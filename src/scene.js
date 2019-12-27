@@ -1,5 +1,5 @@
-import navigator from '@/sailor/navigator'
-import swab from '@/sailor/swab'
+const measure = require('./measure')
+const tracer = require('./tracer')
 
 function generateHitChecker(context, path, transform) {
   return (x, y) => {
@@ -21,11 +21,11 @@ function paintSubject (course, id, hulls) {
     let matrix = course.viewport.context.getTransform()
     let transform = [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f]
     let box = {
-      ...navigator.transformBox(course.boxes[subject.path], transform),
+      ...measure.transformBox(course.boxes[subject.path], transform),
       value: id,
       check: generateHitChecker(course.viewport.context, shape, transform)
     }
-    swab.insert(hulls, box)
+    tracer.insert(hulls, box)
   }
 
   painter(course.viewport.context, shape)
@@ -49,6 +49,4 @@ function paint (course, scene, hulls) {
   return hulls
 }
 
-export default {
-  paint
-}
+exports.paint = paint

@@ -69,11 +69,13 @@ function pathToBox(path) {
   let xmaxs = []
   let ymaxs = []
   path.forEach(subpath => {
-    box = subBox[subpath[0]](...subpath.slice(1))
-    xmins.push(box.xmin)
-    ymins.push(box.ymin)
-    xmaxs.push(box.xmax)
-    ymaxs.push(box.ymax)
+    if (subpath[0] in subBox) {
+      let box = subBox[subpath[0]](...subpath.slice(1))
+      xmins.push(box.xmin)
+      ymins.push(box.ymin)
+      xmaxs.push(box.xmax)
+      ymaxs.push(box.ymax)
+    }
   })
 
   let box = {
@@ -82,8 +84,8 @@ function pathToBox(path) {
       y: Math.min(...ymins)
     },
     max: {
-      x: Math.min(...xmaxs),
-      y: Math.min(...ymaxs)
+      x: Math.max(...xmaxs),
+      y: Math.max(...ymaxs)
     }
   }
 
@@ -154,9 +156,7 @@ function pathValidate(path) {
   return errors
 }
 
-export default {
-  pathToBox,
-  transformBox,
-  pathToCanvas,
-  pathValidate
-}
+exports.pathToBox = pathToBox
+exports.transformBox = transformBox
+exports.pathToCanvas = pathToCanvas
+exports.pathValidate = pathValidate

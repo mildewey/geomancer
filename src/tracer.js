@@ -127,10 +127,8 @@ function intersectBox (tracer, {min, max}) {
   return [...xintersects].filter(val => active.has(val))
 }
 
-export default {
-  tracer,
-  insert,
-  concat,
-  intersectPoint,
-  intersectBox
-}
+exports.tracer = tracer
+exports.insert = insert
+exports.concat = concat
+exports.intersectPoint = intersectPoint
+exports.intersectBox = intersectBox

@@ -1,0 +1,37 @@
+{
+  "name": "geomancer",
+  "version": "1.0.0",
+  "description": "A canvas drawing framework",
+  "main": "src/index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "ava"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mildewey/geomancer.git"
+  },
+  "author": "Mark Dewey",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/mildewey/geomancer/issues"
+  },
+  "homepage": "https://github.com/mildewey/geomancer#readme",
+  "devDependencies": {
+    "ava": "^2.4.0"
+  },
+  "ava": {
+		"files": [
+			"tests/**/*"
+		],
+		"sources": [
+			"src/**/*"
+		],
+		"concurrency": 6,
+		"failFast": true,
+		"failWithoutAssertions": false,
+		"verbose": true
+	}
+}

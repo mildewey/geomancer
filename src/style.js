@@ -73,9 +73,8 @@ function pattern(context, url, type) {
   return ptrn
 }
 
-export default {
-  linearGradient,
-  radialGradient,
-  pattern,
-  palletteToPainter
-}
+
+exports.linearGradient = linearGradient
+exports.radialGradient = radialGradient
+exports.pattern = pattern
+exports.palletteToPainter = palletteToPainter
