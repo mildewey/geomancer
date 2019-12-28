@@ -87,4 +87,4 @@ exports.emptyScene = emptyScene
 exports.emptyCourse = emptyCourse
 exports.pathsToShapes = pathsToShapes
 exports.pathsToBoxes = pathsToBoxes
-exports.palletteToPainter = pallettesToPainters
+exports.pallettesToPainters = pallettesToPainters
