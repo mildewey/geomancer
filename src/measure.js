@@ -156,7 +156,28 @@ function pathValidate(path) {
   return errors
 }
 
-exports.pathToBox = pathToBox
-exports.transformBox = transformBox
-exports.pathToCanvas = pathToCanvas
-exports.pathValidate = pathValidate
+function pathsToShapes (paths) {
+  let shapes = {}
+  for (let id in paths) {
+    let shape = pathToCanvas(paths[id])
+    shapes[id] = shape
+  }
+  return shapes
+}
+
+function pathsToBoxes (paths) {
+  let boxes = {}
+  for (let id in paths) {
+    let box = pathToBox(paths[id])
+    boxes[id] = box
+  }
+  return boxes
+}
+
+export default {
+  pathsToShapes,
+  pathsToBoxes,
+  transformBox,
+  pathToCanvas,
+  pathValidate
+}
