@@ -176,7 +176,7 @@ function pathsToBoxes (paths) {
 
 export default {
   pathsToShapes,
-  pathsToBoxes,
+  pathToBox,
   transformBox,
   pathToCanvas,
   pathValidate
