@@ -127,10 +127,19 @@ function intersectBox (tracer, {min, max}) {
   return [...xintersects].filter(val => active.has(val))
 }
 
+function boxesIntersect(one, two) {
+  if (one.max.x < two.min.x) return false
+  if (two.max.x < one.min.x) return false
+  if (one.max.y < two.min.y) return false
+  if (two.max.y < two.max.y) return false
+  return true
+}
+
 export default {
   tracer,
   insert,
   concat,
   intersectPoint,
-  intersectBox
+  intersectBox,
+  boxesIntersect,
 }

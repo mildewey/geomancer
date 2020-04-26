@@ -13,7 +13,6 @@ function enforceBoundaries (width, height, extents, transform) {
   let maxY = -extents.top*zoom
   let minY = height-extents.bottom*zoom
 
-  console.log("enforce boundaries", transform, minX, maxX, minY, maxY)
   if (x < minX) transform[4] = minX
   if (x > maxX) transform[4] = maxX
   if (y < minY) transform[5] = minY
@@ -34,14 +33,12 @@ function startPanning (mouse) {
   lastX[mouse.target.id] = mouse.clientX
   lastY[mouse.target.id] = mouse.clientY
   isPanning[mouse.target.id] = true
-  console.log("Start panning")
 }
 
 function panning (mouse, width, height, extents, transform) {
   if (!isPanning[mouse.target.id]) {
     return transform
   }
-  console.log("panning")
   let target = [...transform]
   target[4] = transform[4] + mouse.clientX - lastX[mouse.target.id]
   target[5] = transform[5] + mouse.clientY - lastY[mouse.target.id]
@@ -52,7 +49,6 @@ function panning (mouse, width, height, extents, transform) {
 }
 
 function stopPanning (mouse) {
-  console.log("Stop panning")
   isPanning[mouse.target.id] = false
 }
 

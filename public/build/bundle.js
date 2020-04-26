@@ -24,6 +24,26 @@ var app = (function () {
     function safe_not_equal(a, b) {
         return a != a ? b == b : a !== b || ((a && typeof a === 'object') || typeof a === 'function');
     }
+    function validate_store(store, name) {
+        if (store != null && typeof store.subscribe !== 'function') {
+            throw new Error(`'${name}' is not a store with a 'subscribe' method`);
+        }
+    }
+    function subscribe(store, ...callbacks) {
+        if (store == null) {
+            return noop;
+        }
+        const unsub = store.subscribe(...callbacks);
+        return unsub.unsubscribe ? () => unsub.unsubscribe() : unsub;
+    }
+    function get_store_value(store) {
+        let value;
+        subscribe(store, _ => value = _)();
+        return value;
+    }
+    function component_subscribe(component, store, callback) {
+        component.$$.on_destroy.push(subscribe(store, callback));
+    }
     function action_destroyer(action_result) {
         return action_result && is_function(action_result.destroy) ? action_result.destroy : noop;
     }
@@ -70,9 +90,6 @@ var app = (function () {
     function afterUpdate(fn) {
         get_current_component().$$.after_update.push(fn);
     }
-    function onDestroy(fn) {
-        get_current_component().$$.on_destroy.push(fn);
-    }
 
     const dirty_components = [];
     const binding_callbacks = [];
@@ -85,6 +102,10 @@ var app = (function () {
             update_scheduled = true;
             resolved_promise.then(flush);
         }
+    }
+    function tick() {
+        schedule_update();
+        return resolved_promise;
     }
     function add_render_callback(fn) {
         render_callbacks.push(fn);
@@ -316,100 +337,6 @@ var app = (function () {
         }
     }
 
-    const contexts = {};
-    const hitCheckers = {};
-    const transforms = {};
-
-    var events = {
-      contexts,
-      hitCheckers,
-      transforms
-    };
-
-    const lastX = {};
-    const lastY = {};
-    const isPanning = {};
-
-    function enforceBoundaries (width, height, extents, transform) {
-      let zoom = transform[0];
-      let x = transform[4];
-      let y = transform[5];
-      let maxX = -extents.left*zoom;
-      let minX = width-extents.right*zoom;
-      let maxY = -extents.top*zoom;
-      let minY = height-extents.bottom*zoom;
-
-      console.log("enforce boundaries", transform, minX, maxX, minY, maxY);
-      if (x < minX) transform[4] = minX;
-      if (x > maxX) transform[4] = maxX;
-      if (y < minY) transform[5] = minY;
-      if (y > maxY) transform[5] = maxY;
-    }
-
-    function stableZoom ( x, y, zoom, transform ) {
-      let target = [...transform];
-      target[0] = zoom;
-      target[3] = zoom;
-      let factor = zoom/transform[0];
-      target[4] = x - factor * (x-transform[4]);
-      target[5] = y - factor * (y-transform[5]);
-      return target
-    }
-
-    function startPanning (mouse) {
-      lastX[mouse.target.id] = mouse.clientX;
-      lastY[mouse.target.id] = mouse.clientY;
-      isPanning[mouse.target.id] = true;
-      console.log("Start panning");
-    }
-
-    function panning (mouse, width, height, extents, transform) {
-      if (!isPanning[mouse.target.id]) {
-        return transform
-      }
-      console.log("panning");
-      let target = [...transform];
-      target[4] = transform[4] + mouse.clientX - lastX[mouse.target.id];
-      target[5] = transform[5] + mouse.clientY - lastY[mouse.target.id];
-      lastX[mouse.target.id] = mouse.clientX;
-      lastY[mouse.target.id] = mouse.clientY;
-      enforceBoundaries(width, height, extents, target);
-      events.transforms[mouse.target.id].set(target);
-    }
-
-    function stopPanning (mouse) {
-      console.log("Stop panning");
-      isPanning[mouse.target.id] = false;
-    }
-
-    function zooming (mouse, width, height, extents, transform) {
-      let delta = -Math.sign(mouse.deltaY);
-      let zoom = transform[0] * (1.2 ** delta);
-      let minZoom = Math.max(
-        width/(extents.right - extents.left),
-        height/(extents.bottom - extents.top),
-        0.5
-      );
-      if (zoom > 5) zoom = 5;
-      if (zoom < minZoom) zoom = minZoom;
-
-      let target = stableZoom(mouse.offsetX, mouse.offsetY, zoom, transform);
-      enforceBoundaries(width, height, extents, target);
-
-      mouse.preventDefault();
-      mouse.stopPropagation();
-      events.transforms[mouse.target.id].set(target);
-    }
-
-    var view = {
-      enforceBoundaries,
-      stableZoom,
-      startPanning,
-      panning,
-      stopPanning,
-      zooming,
-    };
-
     const validate = {
       moveTo: params => params.length === 2 ? 'moveTo must have 2 parameters' : null,
       lineTo: params => params.length === 2 ? 'lineTo must have 2 parameters' : null,
@@ -557,7 +484,7 @@ var app = (function () {
     }
 
     function pathValidate(path) {
-      if (!path.length) return 'Paths must have at least 2 instructions'
+      if (!path.length) return 'Paths must have at least 1 instruction'
 
       let errors = [];
       path.forEach(subpath => {
@@ -577,18 +504,153 @@ var app = (function () {
       return shapes
     }
 
+    function applyTransform (base, apply) {
+      return [
+        base[0]*apply[0] + base[2]*apply[1],
+        base[1]*apply[0] + base[3]*apply[1],
+        base[0]*apply[2] + base[2]*apply[3],
+        base[1]*apply[2] + base[3]*apply[3],
+        base[0]*apply[4] + base[2]*apply[5] + base[4],
+        base[1]*apply[4] + base[3]*apply[5] + base[5],
+      ]
+    }
+
     var measure = {
       pathsToShapes,
       pathToBox,
       transformBox,
       pathToCanvas,
-      pathValidate
+      pathValidate,
+      applyTransform
     };
 
     var measure$1 = /*#__PURE__*/Object.freeze({
         __proto__: null,
         'default': measure
     });
+
+    function order (layer, subjects = []) {
+      layer.subjects.forEach(subject => {
+    		subjects.push(subject.id);
+      });
+
+      layer.layers.forEach(subLayer => {
+        order(subLayer, subjects);
+      });
+
+      return subjects
+    }
+
+
+    function resolve (transform, layer, subjects = {}) {
+      const layerTransform = measure.applyTransform(transform, layer.transform);
+
+      layer.subjects.forEach(subject => {
+    		let subjectTransform = measure.applyTransform(layerTransform, subject.transform);
+    		subjects[subject.id] = {
+          ...subject,
+          transform: subjectTransform
+        };
+      });
+
+      layer.layers.forEach(subLayer => {
+        resolve(reference, layerTransform, subLayer);
+      });
+
+      return subjects
+    }
+
+
+    var subjects = {
+      order,
+      resolve
+    };
+
+    const transforms = {};
+
+    var events = {
+      transforms
+    };
+
+    const lastX = {};
+    const lastY = {};
+    const isPanning = {};
+
+    function enforceBoundaries (width, height, extents, transform) {
+      let zoom = transform[0];
+      let x = transform[4];
+      let y = transform[5];
+      let maxX = -extents.left*zoom;
+      let minX = width-extents.right*zoom;
+      let maxY = -extents.top*zoom;
+      let minY = height-extents.bottom*zoom;
+
+      if (x < minX) transform[4] = minX;
+      if (x > maxX) transform[4] = maxX;
+      if (y < minY) transform[5] = minY;
+      if (y > maxY) transform[5] = maxY;
+    }
+
+    function stableZoom ( x, y, zoom, transform ) {
+      let target = [...transform];
+      target[0] = zoom;
+      target[3] = zoom;
+      let factor = zoom/transform[0];
+      target[4] = x - factor * (x-transform[4]);
+      target[5] = y - factor * (y-transform[5]);
+      return target
+    }
+
+    function startPanning (mouse) {
+      lastX[mouse.target.id] = mouse.clientX;
+      lastY[mouse.target.id] = mouse.clientY;
+      isPanning[mouse.target.id] = true;
+    }
+
+    function panning (mouse, width, height, extents, transform) {
+      if (!isPanning[mouse.target.id]) {
+        return transform
+      }
+      let target = [...transform];
+      target[4] = transform[4] + mouse.clientX - lastX[mouse.target.id];
+      target[5] = transform[5] + mouse.clientY - lastY[mouse.target.id];
+      lastX[mouse.target.id] = mouse.clientX;
+      lastY[mouse.target.id] = mouse.clientY;
+      enforceBoundaries(width, height, extents, target);
+      events.transforms[mouse.target.id].set(target);
+    }
+
+    function stopPanning (mouse) {
+      isPanning[mouse.target.id] = false;
+    }
+
+    function zooming (mouse, width, height, extents, transform) {
+      let delta = -Math.sign(mouse.deltaY);
+      let zoom = transform[0] * (1.2 ** delta);
+      let minZoom = Math.max(
+        width/(extents.right - extents.left),
+        height/(extents.bottom - extents.top),
+        0.5
+      );
+      if (zoom > 5) zoom = 5;
+      if (zoom < minZoom) zoom = minZoom;
+
+      let target = stableZoom(mouse.offsetX, mouse.offsetY, zoom, transform);
+      enforceBoundaries(width, height, extents, target);
+
+      mouse.preventDefault();
+      mouse.stopPropagation();
+      events.transforms[mouse.target.id].set(target);
+    }
+
+    var view = {
+      enforceBoundaries,
+      stableZoom,
+      startPanning,
+      panning,
+      stopPanning,
+      zooming,
+    };
 
     function sorter (a, b) {
       if (a.index < b.index) return -1
@@ -719,12 +781,21 @@ var app = (function () {
       return [...xintersects].filter(val => active.has(val))
     }
 
+    function boxesIntersect(one, two) {
+      if (one.max.x < two.min.x) return false
+      if (two.max.x < one.min.x) return false
+      if (one.max.y < two.min.y) return false
+      if (two.max.y < two.max.y) return false
+      return true
+    }
+
     var tracer$1 = {
       tracer,
       insert: insert$1,
       concat,
       intersectPoint,
-      intersectBox
+      intersectBox,
+      boxesIntersect,
     };
 
     var tracer$2 = /*#__PURE__*/Object.freeze({
@@ -742,17 +813,18 @@ var app = (function () {
       }
     }
 
-    function makeHull(context, course, id, boxes) {
+    function makeHull(context, course, id) {
       const subject = course.subjects[id];
       if (subject.handle) {
         context.save();
+        context.transform(...subject.transform);
+
         const matrix = context.getTransform();
         const transform = [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f];
-        context.transform(...subject.transform);
 
         const shape = course.shapes[subject.path];
         const check = generateHitChecker(context, shape, transform);
-        const box = !boxes[subject.path] ? measure.pathToBox(course.paths[subject.path]) : boxes[subject.path];
+        const box = course.boxes[subject.path];
 
         context.restore();
         return {
@@ -764,20 +836,20 @@ var app = (function () {
 
     }
 
-    function hulls(context, course, scene, boxes={}, hitChecker=tracer$1.tracer()) {
+    function hulls(context, course, scene, hitChecker=tracer$1.tracer()) {
       context.save();
 
       context.transform(...scene.transform);
 
       scene.subjects.forEach(id => {
-        const hull = makeHull(context, course, id, boxes);
+        const hull = makeHull(context, course, id);
         if (hull) {
           tracer$1.insert(hitChecker, hull);
         }
       });
 
       scene.layers.forEach(layer => {
-        hulls(context, course, layer, boxes, hitChecker);
+        hulls(context, course, layer, hitChecker);
       });
 
       context.restore();
@@ -917,6 +989,16 @@ var app = (function () {
 
     const subscriber_queue = [];
     /**
+     * Creates a `Readable` store that allows reading by subscription.
+     * @param value initial value
+     * @param {StartStopNotifier}start start and stop notifications for subscriptions
+     */
+    function readable(value, start) {
+        return {
+            subscribe: writable(value, start).subscribe,
+        };
+    }
+    /**
      * Create a `Writable` store that allows both updating and reading by subscription.
      * @param {*=}value initial value
      * @param {StartStopNotifier=}start start and stop notifications for subscriptions
@@ -966,6 +1048,47 @@ var app = (function () {
         }
         return { set, update, subscribe };
     }
+    function derived(stores, fn, initial_value) {
+        const single = !Array.isArray(stores);
+        const stores_array = single
+            ? [stores]
+            : stores;
+        const auto = fn.length < 2;
+        return readable(initial_value, (set) => {
+            let inited = false;
+            const values = [];
+            let pending = 0;
+            let cleanup = noop;
+            const sync = () => {
+                if (pending) {
+                    return;
+                }
+                cleanup();
+                const result = fn(single ? values[0] : values, set);
+                if (auto) {
+                    set(result);
+                }
+                else {
+                    cleanup = is_function(result) ? result : noop;
+                }
+            };
+            const unsubscribers = stores_array.map((store, i) => subscribe(store, (value) => {
+                values[i] = value;
+                pending &= ~(1 << i);
+                if (inited) {
+                    sync();
+                }
+            }, () => {
+                pending |= (1 << i);
+            }));
+            inited = true;
+            sync();
+            return function stop() {
+                run_all(unsubscribers);
+                cleanup();
+            };
+        });
+    }
 
     /* src/Geomancer.svelte generated by Svelte v3.20.1 */
 
@@ -986,19 +1109,19 @@ var app = (function () {
     			attr_dev(canvas_1, "id", /*sceneID*/ ctx[1]);
     			attr_dev(canvas_1, "width", canvas_1_width_value = "" + (/*width*/ ctx[2] + "px"));
     			attr_dev(canvas_1, "height", canvas_1_height_value = "" + (/*height*/ ctx[3] + "px"));
-    			add_location(canvas_1, file, 179, 0, 4088);
+    			add_location(canvas_1, file, 242, 0, 5520);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
     		m: function mount(target, anchor, remount) {
     			insert_dev(target, canvas_1, anchor);
-    			/*canvas_1_binding*/ ctx[14](canvas_1);
+    			/*canvas_1_binding*/ ctx[25](canvas_1);
     			if (remount) run_all(dispose);
 
     			dispose = [
     				action_destroyer(eventHandlers_action = eventHandlers.call(null, canvas_1, /*handlers*/ ctx[4])),
-    				listen_dev(canvas_1, "panZoomRotate", /*panZoomRotate_handler*/ ctx[15], false, false, false)
+    				listen_dev(canvas_1, "panZoomRotate", /*panZoomRotate_handler*/ ctx[26], false, false, false)
     			];
     		},
     		p: function update(ctx, [dirty]) {
@@ -1020,7 +1143,7 @@ var app = (function () {
     		o: noop,
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(canvas_1);
-    			/*canvas_1_binding*/ ctx[14](null);
+    			/*canvas_1_binding*/ ctx[25](null);
     			run_all(dispose);
     		}
     	};
@@ -1038,11 +1161,9 @@ var app = (function () {
 
     function eventHandlers(node, events) {
     	for (const ev in events) {
-    		console.log(ev, events);
     		node.addEventListener(ev, events[ev]);
     	}
 
-    	console.log(node);
     	let prevEvents = events;
 
     	return {
@@ -1066,18 +1187,7 @@ var app = (function () {
     }
 
     function instance($$self, $$props, $$invalidate) {
-    	let { sceneID = "geomancer-viewport" } = $$props;
-    	let { width } = $$props;
-    	let { height } = $$props;
-    	let { extents = { left: 0, right: 800, top: 0, bottom: 800 } } = $$props;
-
-    	let { handlers = {
-    		mousedown: view.startPanning,
-    		mouseup: view.stopPanning,
-    		mouseout: view.stopPanning,
-    		mousemove: event => view.panning(event, width, height, extents, transform),
-    		wheel: event => view.zooming(event, width, height, extents, transform)
-    	} } = $$props;
+    	let $orderedSubjects;
 
     	let { paths = {
     		hexagon: [
@@ -1090,7 +1200,7 @@ var app = (function () {
     			["closePath"]
     		],
     		boundaries: [["rect", 10, 10, 780, 780]]
-    	} } = $$props; // a dictionary of step by step instructions for building shapes
+    	} } = $$props;
 
     	let { pallettes = {
     		black: {
@@ -1103,89 +1213,170 @@ var app = (function () {
     			strokeStyle: "black",
     			lineJoin: "round"
     		}
-    	} } = $$props; // a dictionary of coloring and brush information
-
-    	let { subjects = {
-    		hex: {
-    			path: "hexagon",
-    			pallette: "black",
-    			transform: [1, 0, 0, 1, 100, 100],
-    			handle: true
-    		},
-    		boundaries: {
-    			path: "boundaries",
-    			pallette: "thinBlackLines",
-    			transform: [1, 0, 0, 1, 0, 0]
-    		}
     	} } = $$props;
-
-    	let { transform = [1, 0, 0, 1, 0, 0] } = $$props;
 
     	let { layers = [
     		{
-    			transform: [1, 0, 0, 1, 0, 0],
-    			subjects: ["hex"],
-    			layers: []
+    			subjects: [
+    				{
+    					id: "loneHex",
+    					path: "hexagon",
+    					pallette: "black",
+    					transform: [1, 0, 0, 1, 100, 100],
+    					visible: true
+    				},
+    				{
+    					id: "boundary",
+    					path: "boundaries",
+    					pallette: "thinBlackLines",
+    					transform: [1, 0, 0, 1, 0, 0],
+    					visible: true
+    				}
+    			],
+    			layers: [],
+    			transform: [1, 0, 0, 1, 0, 0]
     		}
     	] } = $$props;
 
-    	// a list of scene objects which look like this:
-    	// {
-    	//   transform: defaultTransform(),
-    	//   subjects: [], // a list of subjects to draw, the subjects will be drawn in order, so the 0th subject will be behind the others
-    	//   layers: [] // list of nested scene objects
-    	// }
-    	// the layers will be drawn in order, so the 0th layer is the bottom layer
-    	events.contexts[sceneID] = writable(null);
+    	let { sceneID = "geomancer-viewport" } = $$props;
+    	let { width = 800 } = $$props;
+    	let { height = 800 } = $$props;
+    	let { transform = [1, 0, 0, 1, 0, 0] } = $$props;
+    	let { extents = { left: 0, right: 800, top: 0, bottom: 800 } } = $$props;
 
-    	events.hitCheckers[sceneID] = writable(null);
-    	events.transforms[sceneID] = writable(transform);
+    	let { handlers = {
+    		mousedown: view.startPanning,
+    		mouseup: view.stopPanning,
+    		mouseout: view.stopPanning,
+    		mousemove: event => view.panning(event, width, height, extents, transform),
+    		wheel: event => view.zooming(event, width, height, extents, transform)
+    	} } = $$props;
 
-    	events.transforms[sceneID].subscribe(newTransform => {
-    		console.log("Changing transform to", newTransform);
-    		$$invalidate(0, transform = newTransform);
+    	const pathsStore = writable(paths);
+    	const pallettesStore = writable(pallettes);
+    	const transformStore = writable(transform);
+    	const boxStore = writable({ width, height });
+
+    	const viewportStore = derived([transformStore, boxStore], ([$transformStore, $boxStore]) => ({
+    		transform: $transformStore,
+    		box: measure.transformBox(measure.pathToBox(["rect", 0, 0, $boxStore.width, $boxStore.height]), $transformStore)
+    	}));
+
+    	const layerStore = writable(null);
+
+    	const orderedSubjects = derived(layerStore, $layerStore => {
+    		const os = [];
+    		if ($layerStore !== null) $layerStore.forEach(layer => subjects.order(layer, os));
+    		return os;
     	});
+
+    	validate_store(orderedSubjects, "orderedSubjects");
+    	component_subscribe($$self, orderedSubjects, value => $$invalidate(17, $orderedSubjects = value));
+    	const pathStores = {};
+    	const shapeStores = {};
+    	const palletteStores = {};
+    	const painterStores = {};
+    	const patternStores = {};
+    	const subjectStores = {};
+
+    	pathsStore.subscribe(paths => {
+    		for (const p in paths) {
+    			if (pathStores[p] === undefined) {
+    				const pathStore = writable(paths[p]);
+    				pathStores[p] = pathStore;
+
+    				shapeStores[p] = derived(pathStore, $pathStore => ({
+    					shape: measure.pathToCanvas($pathStore),
+    					box: measure.pathToBox($pathStore)
+    				}));
+    			} else {
+    				pathStores[p].set(paths[p]);
+    			}
+    		}
+    	});
+
+    	pallettesStore.subscribe(pallettes => {
+    		for (const p in pallettes) {
+    			if (palletteStores[p] === undefined) {
+    				const palletteStore = writable(pallettes[p]);
+    				palletteStores[p] = palletteStore;
+    				painterStores[p] = derived(palletteStore, $palletteStore => style.palletteToPainter($palletteStore));
+    			} else {
+    				palletteStores[p].set(pallettes[p]);
+    			}
+    		}
+    	});
+
+    	layerStore.subscribe(layers => {
+    		if (layers === null) return;
+    		const patterns = {};
+    		layers.forEach(layer => subjects.resolve([1, 0, 0, 1, 0, 0], layer, patterns));
+
+    		for (const p in patterns) {
+    			if (patternStores[p] === undefined) {
+    				patternStores[p] = writable(patterns[p]);
+    			} else {
+    				patternStores[p].set(patterns[p]);
+    			}
+    		}
+
+    		for (const p in patterns) {
+    			if (subjectStores[p] === undefined) {
+    				const pattern = patterns[p];
+    				const patternStore = patternStores[p];
+    				const shape = shapeStores[pattern.path];
+    				const painter = painterStores[pattern.pallette];
+
+    				subjectStores[p] = derived([viewportStore, patternStore, shape, painter], ([$viewportStore, $patternStore, $shape, $painter]) => ({
+    					id: $patternStore.id,
+    					draw: $painter,
+    					shape: $shape.shape,
+    					transform: $patternStore.transform,
+    					visible: $patternStore.visible, // && tracer.boxesIntersect(($viewportStore).box, ($shape).box)
+    					
+    				}));
+    			}
+    		}
+    	});
+
+    	function draw(context) {
+    		console.time("draw");
+    		context.setTransform(1, 0, 0, 1, 0, 0);
+    		context.clearRect(0, 0, width, height);
+    		context.setTransform(...transform);
+
+    		$orderedSubjects.map(s => {
+    			return subjectStores[s];
+    		}).filter(s => s !== undefined).map(s => get_store_value(s)).filter(s => s.visible).forEach(subject => {
+    			context.save();
+    			context.transform(...subject.transform);
+    			subject.draw(context, subject.shape);
+    			context.restore();
+    		});
+
+    		console.timeEnd("draw");
+    	}
 
     	let canvas;
 
-    	function draw() {
-    		const context = canvas.getContext("2d");
-    		context.setTransform(1, 0, 0, 1, 0, 0);
-    		console.log("clear rect", width, height);
-    		context.clearRect(0, 0, width, height);
-    		scene.paint(context, course, viewport);
-    		events.contexts[sceneID].set(context);
-    		events.hitCheckers[sceneID].set(handles.hulls(context, course, viewport));
-    	}
-
     	onMount(() => {
-    		console.log("Mounting Geomancer canvas");
-    		view.enforceBoundaries(width, height, extents, transform);
-    		draw();
+    		draw(canvas.getContext("2d"));
     	});
 
     	afterUpdate(() => {
-    		console.log("Updated Geomancer canvas");
-    		draw();
-    	});
-
-    	onDestroy(() => {
-    		delete events.contexts[sceneID];
-    		delete events.hitCheckers[sceneID];
-    		delete events.transforms[sceneID];
+    		draw(canvas.getContext("2d"));
     	});
 
     	const writable_props = [
+    		"paths",
+    		"pallettes",
+    		"layers",
     		"sceneID",
     		"width",
     		"height",
-    		"extents",
-    		"handlers",
-    		"paths",
-    		"pallettes",
-    		"subjects",
     		"transform",
-    		"layers"
+    		"extents",
+    		"handlers"
     	];
 
     	Object.keys($$props).forEach(key => {
@@ -1204,20 +1395,21 @@ var app = (function () {
     	const panZoomRotate_handler = change => $$invalidate(0, transform = change);
 
     	$$self.$set = $$props => {
+    		if ("paths" in $$props) $$invalidate(7, paths = $$props.paths);
+    		if ("pallettes" in $$props) $$invalidate(8, pallettes = $$props.pallettes);
+    		if ("layers" in $$props) $$invalidate(9, layers = $$props.layers);
     		if ("sceneID" in $$props) $$invalidate(1, sceneID = $$props.sceneID);
     		if ("width" in $$props) $$invalidate(2, width = $$props.width);
     		if ("height" in $$props) $$invalidate(3, height = $$props.height);
-    		if ("extents" in $$props) $$invalidate(6, extents = $$props.extents);
-    		if ("handlers" in $$props) $$invalidate(4, handlers = $$props.handlers);
-    		if ("paths" in $$props) $$invalidate(7, paths = $$props.paths);
-    		if ("pallettes" in $$props) $$invalidate(8, pallettes = $$props.pallettes);
-    		if ("subjects" in $$props) $$invalidate(9, subjects = $$props.subjects);
     		if ("transform" in $$props) $$invalidate(0, transform = $$props.transform);
-    		if ("layers" in $$props) $$invalidate(10, layers = $$props.layers);
+    		if ("extents" in $$props) $$invalidate(10, extents = $$props.extents);
+    		if ("handlers" in $$props) $$invalidate(4, handlers = $$props.handlers);
     	};
 
     	$$self.$capture_state = () => ({
     		writable,
+    		derived,
+    		get: get_store_value,
     		style,
     		scene,
     		measure,
@@ -1225,61 +1417,74 @@ var app = (function () {
     		events,
     		handles,
     		view,
+    		subjects,
     		onMount,
     		afterUpdate,
-    		onDestroy,
+    		tick,
+    		paths,
+    		pallettes,
+    		layers,
     		sceneID,
     		width,
     		height,
+    		transform,
     		extents,
     		handlers,
-    		paths,
-    		pallettes,
-    		subjects,
-    		transform,
-    		layers,
-    		canvas,
+    		pathsStore,
+    		pallettesStore,
+    		transformStore,
+    		boxStore,
+    		viewportStore,
+    		layerStore,
+    		orderedSubjects,
+    		pathStores,
+    		shapeStores,
+    		palletteStores,
+    		painterStores,
+    		patternStores,
+    		subjectStores,
     		draw,
     		eventHandlers,
-    		course,
-    		viewport
+    		canvas,
+    		$orderedSubjects
     	});
 
     	$$self.$inject_state = $$props => {
+    		if ("paths" in $$props) $$invalidate(7, paths = $$props.paths);
+    		if ("pallettes" in $$props) $$invalidate(8, pallettes = $$props.pallettes);
+    		if ("layers" in $$props) $$invalidate(9, layers = $$props.layers);
     		if ("sceneID" in $$props) $$invalidate(1, sceneID = $$props.sceneID);
     		if ("width" in $$props) $$invalidate(2, width = $$props.width);
     		if ("height" in $$props) $$invalidate(3, height = $$props.height);
-    		if ("extents" in $$props) $$invalidate(6, extents = $$props.extents);
-    		if ("handlers" in $$props) $$invalidate(4, handlers = $$props.handlers);
-    		if ("paths" in $$props) $$invalidate(7, paths = $$props.paths);
-    		if ("pallettes" in $$props) $$invalidate(8, pallettes = $$props.pallettes);
-    		if ("subjects" in $$props) $$invalidate(9, subjects = $$props.subjects);
     		if ("transform" in $$props) $$invalidate(0, transform = $$props.transform);
-    		if ("layers" in $$props) $$invalidate(10, layers = $$props.layers);
+    		if ("extents" in $$props) $$invalidate(10, extents = $$props.extents);
+    		if ("handlers" in $$props) $$invalidate(4, handlers = $$props.handlers);
     		if ("canvas" in $$props) $$invalidate(5, canvas = $$props.canvas);
-    		if ("course" in $$props) course = $$props.course;
-    		if ("viewport" in $$props) viewport = $$props.viewport;
     	};
-
-    	let course;
-    	let viewport;
 
     	if ($$props && "$$inject" in $$props) {
     		$$self.$inject_state($$props.$$inject);
     	}
 
     	$$self.$$.update = () => {
-    		if ($$self.$$.dirty & /*paths, pallettes, subjects*/ 896) {
-    			 course = {
-    				paths,
-    				shapes: measure.pathsToShapes(paths),
-    				painters: style.pallettesToPainters(pallettes),
-    				subjects
-    			};
+    		if ($$self.$$.dirty & /*paths*/ 128) {
+    			 pathsStore.set(paths);
     		}
 
-    		if ($$self.$$.dirty & /*transform, layers*/ 1025) {
-    			 viewport = { transform, layers, subjects: [] };
+    		if ($$self.$$.dirty & /*pallettes*/ 256) {
+    			 pallettesStore.set(pallettes);
+    		}
+
+    		if ($$self.$$.dirty & /*transform*/ 1) {
+    			 transformStore.set(transform);
+    		}
+
+    		if ($$self.$$.dirty & /*width, height*/ 12) {
+    			 boxStore.set({ width, height });
+    		}
+
+    		if ($$self.$$.dirty & /*layers*/ 512) {
+    			 layerStore.set(layers);
     		}
     	};
 
@@ -1290,13 +1495,24 @@ var app = (function () {
     		height,
     		handlers,
     		canvas,
-    		extents,
+    		orderedSubjects,
     		paths,
     		pallettes,
-    		subjects,
     		layers,
-    		course,
-    		viewport,
+    		extents,
+    		pathStores,
+    		shapeStores,
+    		palletteStores,
+    		painterStores,
+    		patternStores,
+    		subjectStores,
+    		$orderedSubjects,
+    		pathsStore,
+    		pallettesStore,
+    		transformStore,
+    		boxStore,
+    		viewportStore,
+    		layerStore,
     		draw,
     		canvas_1_binding,
     		panZoomRotate_handler
@@ -1308,28 +1524,16 @@ var app = (function () {
     		super();
 
     		init(this, { target: this.shadowRoot }, instance, create_fragment, safe_not_equal, {
+    			paths: 7,
+    			pallettes: 8,
+    			layers: 9,
     			sceneID: 1,
     			width: 2,
     			height: 3,
-    			extents: 6,
-    			handlers: 4,
-    			paths: 7,
-    			pallettes: 8,
-    			subjects: 9,
     			transform: 0,
-    			layers: 10
+    			extents: 10,
+    			handlers: 4
     		});
-
-    		const { ctx } = this.$$;
-    		const props = this.attributes;
-
-    		if (/*width*/ ctx[2] === undefined && !("width" in props)) {
-    			console_1.warn("<geomancer-scene> was created without expected prop 'width'");
-    		}
-
-    		if (/*height*/ ctx[3] === undefined && !("height" in props)) {
-    			console_1.warn("<geomancer-scene> was created without expected prop 'height'");
-    		}
 
     		if (options) {
     			if (options.target) {
@@ -1345,17 +1549,43 @@ var app = (function () {
 
     	static get observedAttributes() {
     		return [
+    			"paths",
+    			"pallettes",
+    			"layers",
     			"sceneID",
     			"width",
     			"height",
-    			"extents",
-    			"handlers",
-    			"paths",
-    			"pallettes",
-    			"subjects",
     			"transform",
-    			"layers"
+    			"extents",
+    			"handlers"
     		];
+    	}
+
+    	get paths() {
+    		return this.$$.ctx[7];
+    	}
+
+    	set paths(paths) {
+    		this.$set({ paths });
+    		flush();
+    	}
+
+    	get pallettes() {
+    		return this.$$.ctx[8];
+    	}
+
+    	set pallettes(pallettes) {
+    		this.$set({ pallettes });
+    		flush();
+    	}
+
+    	get layers() {
+    		return this.$$.ctx[9];
+    	}
+
+    	set layers(layers) {
+    		this.$set({ layers });
+    		flush();
     	}
 
     	get sceneID() {
@@ -1385,8 +1615,17 @@ var app = (function () {
     		flush();
     	}
 
+    	get transform() {
+    		return this.$$.ctx[0];
+    	}
+
+    	set transform(transform) {
+    		this.$set({ transform });
+    		flush();
+    	}
+
     	get extents() {
-    		return this.$$.ctx[6];
+    		return this.$$.ctx[10];
     	}
 
     	set extents(extents) {
@@ -1400,51 +1639,6 @@ var app = (function () {
 
     	set handlers(handlers) {
     		this.$set({ handlers });
-    		flush();
-    	}
-
-    	get paths() {
-    		return this.$$.ctx[7];
-    	}
-
-    	set paths(paths) {
-    		this.$set({ paths });
-    		flush();
-    	}
-
-    	get pallettes() {
-    		return this.$$.ctx[8];
-    	}
-
-    	set pallettes(pallettes) {
-    		this.$set({ pallettes });
-    		flush();
-    	}
-
-    	get subjects() {
-    		return this.$$.ctx[9];
-    	}
-
-    	set subjects(subjects) {
-    		this.$set({ subjects });
-    		flush();
-    	}
-
-    	get transform() {
-    		return this.$$.ctx[0];
-    	}
-
-    	set transform(transform) {
-    		this.$set({ transform });
-    		flush();
-    	}
-
-    	get layers() {
-    		return this.$$.ctx[10];
-    	}
-
-    	set layers(layers) {
-    		this.$set({ layers });
     		flush();
     	}
     }
