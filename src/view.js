@@ -19,7 +19,7 @@ function enforceBoundaries (width, height, extents, transform) {
   if (y > maxY) transform[5] = maxY
 }
 
-function stableZoom ( x, y, zoom, transform ) {
+function stableZoom (x, y, zoom, transform) {
   let target = [...transform]
   target[0] = zoom
   target[3] = zoom
@@ -29,30 +29,32 @@ function stableZoom ( x, y, zoom, transform ) {
   return target
 }
 
-function startPanning (mouse) {
-  lastX[mouse.target.id] = mouse.clientX
-  lastY[mouse.target.id] = mouse.clientY
-  isPanning[mouse.target.id] = true
+function startPanning (mouse, context) {
+  lastX[context.element.id] = mouse.clientX
+  lastY[context.element.id] = mouse.clientY
+  isPanning[context.element.id] = true
 }
 
-function panning (mouse, width, height, extents, transform) {
-  if (!isPanning[mouse.target.id]) {
-    return transform
+function panning (mouse, context) {
+  if (!isPanning[context.element.id]) {
+    return;
   }
-  let target = [...transform]
-  target[4] = transform[4] + mouse.clientX - lastX[mouse.target.id]
-  target[5] = transform[5] + mouse.clientY - lastY[mouse.target.id]
-  lastX[mouse.target.id] = mouse.clientX
-  lastY[mouse.target.id] = mouse.clientY
+  let transform = context.transform
+  let target = [...$transform]
+  target[4] = transform[4] + mouse.clientX - lastX[context.element.id]
+  target[5] = transform[5] + mouse.clientY - lastY[context.element.id]
+  lastX[context.element.id] = mouse.clientX
+  lastY[context.element.id] = mouse.clientY
   enforceBoundaries(width, height, extents, target)
-  events.transforms[mouse.target.id].set(target)
+  context.transform.set(target)
 }
 
-function stopPanning (mouse) {
-  isPanning[mouse.target.id] = false
+function stopPanning (mouse, node) {
+  isPanning[node.id] = false
 }
 
-function zooming (mouse, width, height, extents, transform) {
+function zooming (mouse, node, width, height, extents, transform) {
+  console.log(width, height, extents, transform)
   let delta = -Math.sign(mouse.deltaY)
   let zoom = transform[0] * (1.2 ** delta)
   let minZoom = Math.max(
@@ -68,7 +70,8 @@ function zooming (mouse, width, height, extents, transform) {
 
   mouse.preventDefault()
   mouse.stopPropagation()
-  events.transforms[mouse.target.id].set(target)
+  console.log(target)
+  node.dispatchEvent(new CustomEvent("panZoomRotate", {transform: target}))
 }
 
 export default {

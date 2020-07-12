@@ -135,6 +135,19 @@ function boxesIntersect(one, two) {
   return true
 }
 
+function boxBox(boxes) {
+  return {
+    max: {
+      x: Math.max(...boxes.map(box => box.max.x)),
+      y: Math.max(...boxes.map(box => box.max.y))
+    },
+    min: {
+      x: Math.min(...boxes.map(box => box.min.x)),
+      y: Math.min(...boxes.map(box => box.min.y))
+    }
+  }
+}
+
 export default {
   tracer,
   insert,

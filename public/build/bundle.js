@@ -24,11 +24,6 @@ var app = (function () {
     function safe_not_equal(a, b) {
         return a != a ? b == b : a !== b || ((a && typeof a === 'object') || typeof a === 'function');
     }
-    function validate_store(store, name) {
-        if (store != null && typeof store.subscribe !== 'function') {
-            throw new Error(`'${name}' is not a store with a 'subscribe' method`);
-        }
-    }
     function subscribe(store, ...callbacks) {
         if (store == null) {
             return noop;
@@ -41,12 +36,6 @@ var app = (function () {
         subscribe(store, _ => value = _)();
         return value;
     }
-    function component_subscribe(component, store, callback) {
-        component.$$.on_destroy.push(subscribe(store, callback));
-    }
-    function action_destroyer(action_result) {
-        return action_result && is_function(action_result.destroy) ? action_result.destroy : noop;
-    }
     function insert(target, node, anchor) {
         target.insertBefore(node, anchor || null);
     }
@@ -55,10 +44,6 @@ var app = (function () {
     }
     function element(name) {
         return document.createElement(name);
-    }
-    function listen(node, event, handler, options) {
-        node.addEventListener(event, handler, options);
-        return () => node.removeEventListener(event, handler, options);
     }
     function attr(node, attribute, value) {
         if (value == null)
@@ -87,9 +72,6 @@ var app = (function () {
     function onMount(fn) {
         get_current_component().$$.on_mount.push(fn);
     }
-    function afterUpdate(fn) {
-        get_current_component().$$.after_update.push(fn);
-    }
 
     const dirty_components = [];
     const binding_callbacks = [];
@@ -102,10 +84,6 @@ var app = (function () {
             update_scheduled = true;
             resolved_promise.then(flush);
         }
-    }
-    function tick() {
-        schedule_update();
-        return resolved_promise;
     }
     function add_render_callback(fn) {
         render_callbacks.push(fn);
@@ -309,19 +287,6 @@ var app = (function () {
         dispatch_dev("SvelteDOMRemove", { node });
         detach(node);
     }
-    function listen_dev(node, event, handler, options, has_prevent_default, has_stop_propagation) {
-        const modifiers = options === true ? ["capture"] : options ? Array.from(Object.keys(options)) : [];
-        if (has_prevent_default)
-            modifiers.push('preventDefault');
-        if (has_stop_propagation)
-            modifiers.push('stopPropagation');
-        dispatch_dev("SvelteDOMAddEventListener", { node, event, handler, modifiers });
-        const dispose = listen(node, event, handler, options);
-        return () => {
-            dispatch_dev("SvelteDOMRemoveEventListener", { node, event, handler, modifiers });
-            dispose();
-        };
-    }
     function attr_dev(node, attribute, value) {
         attr(node, attribute, value);
         if (value == null)
@@ -477,6 +442,7 @@ var app = (function () {
 
       let p2d = new Path2D();
       path.forEach(subpath => {
+        console.log(subpath);
         p2d[subpath[0]](...subpath.slice(1));
       });
 
@@ -566,10 +532,8 @@ var app = (function () {
       resolve
     };
 
-    const transforms = {};
-
     var events = {
-      transforms
+
     };
 
     const lastX = {};
@@ -591,7 +555,7 @@ var app = (function () {
       if (y > maxY) transform[5] = maxY;
     }
 
-    function stableZoom ( x, y, zoom, transform ) {
+    function stableZoom (x, y, zoom, transform) {
       let target = [...transform];
       target[0] = zoom;
       target[3] = zoom;
@@ -601,30 +565,32 @@ var app = (function () {
       return target
     }
 
-    function startPanning (mouse) {
-      lastX[mouse.target.id] = mouse.clientX;
-      lastY[mouse.target.id] = mouse.clientY;
-      isPanning[mouse.target.id] = true;
+    function startPanning (mouse, context) {
+      lastX[context.element.id] = mouse.clientX;
+      lastY[context.element.id] = mouse.clientY;
+      isPanning[context.element.id] = true;
     }
 
-    function panning (mouse, width, height, extents, transform) {
-      if (!isPanning[mouse.target.id]) {
-        return transform
+    function panning (mouse, context) {
+      if (!isPanning[context.element.id]) {
+        return;
       }
-      let target = [...transform];
-      target[4] = transform[4] + mouse.clientX - lastX[mouse.target.id];
-      target[5] = transform[5] + mouse.clientY - lastY[mouse.target.id];
-      lastX[mouse.target.id] = mouse.clientX;
-      lastY[mouse.target.id] = mouse.clientY;
+      let transform = context.transform;
+      let target = [...$transform];
+      target[4] = transform[4] + mouse.clientX - lastX[context.element.id];
+      target[5] = transform[5] + mouse.clientY - lastY[context.element.id];
+      lastX[context.element.id] = mouse.clientX;
+      lastY[context.element.id] = mouse.clientY;
       enforceBoundaries(width, height, extents, target);
-      events.transforms[mouse.target.id].set(target);
+      context.transform.set(target);
     }
 
-    function stopPanning (mouse) {
-      isPanning[mouse.target.id] = false;
+    function stopPanning (mouse, node) {
+      isPanning[node.id] = false;
     }
 
-    function zooming (mouse, width, height, extents, transform) {
+    function zooming (mouse, node, width, height, extents, transform) {
+      console.log(width, height, extents, transform);
       let delta = -Math.sign(mouse.deltaY);
       let zoom = transform[0] * (1.2 ** delta);
       let minZoom = Math.max(
@@ -640,7 +606,8 @@ var app = (function () {
 
       mouse.preventDefault();
       mouse.stopPropagation();
-      events.transforms[mouse.target.id].set(target);
+      console.log(target);
+      node.dispatchEvent(new CustomEvent("panZoomRotate", {transform: target}));
     }
 
     var view = {
@@ -912,8 +879,10 @@ var app = (function () {
     };
 
     function palletteToPainter(options) {
+      console.log(options);
       let pallette = {...defaults, ...options};
       function painter(context, path) {
+        console.log(context, path, pallette);
         context.lineWidth = pallette.lineWidth;
         context.lineCap = pallette.lineCap;
         context.lineJoin = pallette.lineJoin;
@@ -1090,6 +1059,278 @@ var app = (function () {
         });
     }
 
+    // Unique ID creation requires a high quality random # generator. In the browser we therefore
+    // require the crypto API and do not support built-in fallback to lower quality random number
+    // generators (like Math.random()).
+    // getRandomValues needs to be invoked in a context where "this" is a Crypto implementation. Also,
+    // find the complete implementation of crypto (msCrypto) on IE11.
+    var getRandomValues = typeof crypto !== 'undefined' && crypto.getRandomValues && crypto.getRandomValues.bind(crypto) || typeof msCrypto !== 'undefined' && typeof msCrypto.getRandomValues === 'function' && msCrypto.getRandomValues.bind(msCrypto);
+    var rnds8 = new Uint8Array(16);
+    function rng() {
+      if (!getRandomValues) {
+        throw new Error('crypto.getRandomValues() not supported. See https://github.com/uuidjs/uuid#getrandomvalues-not-supported');
+      }
+
+      return getRandomValues(rnds8);
+    }
+
+    /**
+     * Convert array of 16 byte values to UUID string format of the form:
+     * XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+     */
+    var byteToHex = [];
+
+    for (var i = 0; i < 256; ++i) {
+      byteToHex.push((i + 0x100).toString(16).substr(1));
+    }
+
+    function bytesToUuid(buf, offset_) {
+      var offset = offset_ || 0; // Note: Be careful editing this code!  It's been tuned for performance
+      // and works in ways you may not expect. See https://github.com/uuidjs/uuid/pull/434
+
+      return (byteToHex[buf[offset + 0]] + byteToHex[buf[offset + 1]] + byteToHex[buf[offset + 2]] + byteToHex[buf[offset + 3]] + '-' + byteToHex[buf[offset + 4]] + byteToHex[buf[offset + 5]] + '-' + byteToHex[buf[offset + 6]] + byteToHex[buf[offset + 7]] + '-' + byteToHex[buf[offset + 8]] + byteToHex[buf[offset + 9]] + '-' + byteToHex[buf[offset + 10]] + byteToHex[buf[offset + 11]] + byteToHex[buf[offset + 12]] + byteToHex[buf[offset + 13]] + byteToHex[buf[offset + 14]] + byteToHex[buf[offset + 15]]).toLowerCase();
+    }
+
+    function v4(options, buf, offset) {
+      options = options || {};
+      var rnds = options.random || (options.rng || rng)(); // Per 4.4, set bits for version and `clock_seq_hi_and_reserved`
+
+      rnds[6] = rnds[6] & 0x0f | 0x40;
+      rnds[8] = rnds[8] & 0x3f | 0x80; // Copy bytes to buffer, if provided
+
+      if (buf) {
+        offset = offset || 0;
+
+        for (var i = 0; i < 16; ++i) {
+          buf[offset + i] = rnds[i];
+        }
+
+        return buf;
+      }
+
+      return bytesToUuid(rnds);
+    }
+
+    function path(instructions) {
+      const pathStore = writable(instructions);
+      let shapeStore = derived(pathStore, $path =>({
+        shape: measure.pathToCanvas($path),
+        box: measure.pathToBox($path)
+      }));
+
+      return {
+        set: newInstructions => pathStore.set(newInstructions),
+        subscribe: callback => shapeStore.subscribe(callback)
+      }
+    }
+
+    function pallette(styling) {
+      console.log(styling);
+      const palletteStore = writable(styling);
+      let painterStore = derived(palletteStore, $pallette => style.palletteToPainter($pallette));
+
+      return {
+        set: newStyle => palletteStore.set(newStyle),
+        subscribe: callback => painterStore.subscribe(callback)
+      }
+    }
+
+    function resetStore(store, subscribers) {
+      subscribers.forEach(sub => {
+        sub.unsubscribe = store.subscribe(sub.callback);
+      });
+      return store
+    }
+
+    function subscription(store, subscribers, callback) {
+      const index = v4();
+      const unsubscribe = store.subscribe(callback);
+      subscribers[index] = {callback, unsubscribe};
+
+      return () => {
+        subscribers[index].unsubscribe();
+        delete subscribers[index];
+      }
+    }
+
+    function pattern$1(path, pallette) {
+      function reaction([path, pallette]) {
+        return {
+          draw: context => pallette(context, path.shape),
+          box: path.box
+        }
+      }
+
+      let store = derived([path, pallette], reaction);
+      const subscribers = {};
+
+      return {
+        set: (newPath, newPallette) => {
+          path = newPath;
+          pallette = newPallette;
+          store = resetStore(derived([path, pallette], reaction), subscribers);
+        },
+        setPath: (newPath) => {
+          path = newPath;
+          store = resetStore(derived([path, pallette], reaction), subscribers);
+        },
+        setPallette: (newPallette) => {
+          pallette = newPallette;
+          store = resetStore(derived([path, pallette], reaction), subscribers);
+        },
+        subscribe: (callback) => {
+          return subscription(store, subscribers, callback)
+        }
+      }
+    }
+
+    function subject(pattern, transform, visible) {
+      const transformStore = writable(transform);
+      const visibleStore = writable(visible);
+
+      function reaction([pattern, transform, visible]) {
+        return {
+          draw: (context, viewport) => {
+            context.save();
+            context.transform(...transform);
+            const t = context.getTransform();
+            const subjectBox = measure.transformBox(pattern.box, [t.a, t.b, t.c, t.d, t.e, t.f]);
+            if (visible && tracer$1.boxesIntersect(viewport, subjectBox)) {
+              pattern.draw(context);
+              context.restore();
+            }
+          }
+        }
+      }
+
+      let store = derived([pattern, transformStore, visibleStore], reaction);
+      const subscribers = {};
+
+      return {
+        set: (newPattern, newTransform, newVisible) => {
+          subscribers.forEach(sub => {sub.unsubscribe();});
+          const newStore = derived([newPattern, transformStore, visibleStore], reaction);
+          transformStore.set(newTransform);
+          visibleStore.set(newVisible);
+          store = resetStore(newStore, subscribers);
+        },
+        setTransform: (newTransform) => {
+          transformStore.set(newTransform);
+        },
+        setVisible: (newVisible) => {
+          visibleStore.set(newVisible);
+        },
+        setPattern: (newPattern) => {
+          subscribers.forEach(sub => {sub.unsubscribe();});
+          store = resetStore(derived([newPattern, transformStore, visibleStore], reaction));
+        },
+        subscribe: (callback) => {
+          return subscription(store, subscribers, callback)
+        }
+      }
+    }
+
+    function layer(subjects, transform, visible) {
+      const transformStore = writable(transform);
+      const visibleStore = writable(visible);
+
+      function reaction([transform, visible, ...subjects]) {
+        console.log(transform);
+        return {
+          draw: (context, viewport) => {
+            if (visible) {
+              context.save();
+              context.transform(...transform);
+              subjects.forEach(sub => console.log("layer", sub));
+              subjects.forEach(subject => subject.draw(context, viewport));
+              context.restore();
+            }
+          }
+        }
+      }
+
+      let store = derived([transformStore, visibleStore, ...subjects], reaction);
+      const subscribers = {};
+
+      return {
+        set: (newSubjects, newTransform, newVisible) => {
+          subscribers.forEach(sub => {sub.unsubscribe();});
+          const newStore = derived([transformStore, visibleStore, ...newSubjects], reaction);
+          transformStore.set(newTransform);
+          visibleStore.set(newVisible);
+          store = resetStore(newStore, subscribers);
+        },
+        setTransform: (newTransform) => {
+          transformStore.set(newTransform);
+        },
+        setVisible: (newVisible) => {
+          visibleStore.set(newVisible);
+        },
+        setSubjects: (newSubjects) => {
+          subscribers.forEach(sub => {sub.unsubscribe();});
+          const newStore = derived([transformStore, visibleStore, ...newSubjects], reaction);
+          store = resetStore(newStore, subscribers);
+        },
+        subscribe: (callback) => {
+          return subscription(store, subscribers, callback)
+        }
+      }
+    }
+
+    function camera(subjects, transform, width, height) {
+      const transformStore = writable(transform);
+      const widthStore = writable(width);
+      const heightStore = writable(height);
+
+      function reaction([transform, width, height, ...subjects]) {
+        const viewport = measure.transformBox({min: {x: 0, y: 0}, max: {x: width, y: height}}, transform);
+        return {
+          draw: (context) => {
+            console.time("full draw");
+            context.setTransform(1, 0, 0, 1, 0, 0);
+            context.save();
+            subjects.forEach(sub => console.log(sub));
+            subjects.forEach(subject => subject.draw(context, viewport));
+            context.restore();
+            context.transform(...transform);
+            console.timeEnd("full draw");
+          }
+        }
+      }
+
+      let store = derived([transformStore, widthStore, heightStore, ...subjects], reaction);
+      const subscribers = {};
+
+      return {
+        set: (newLayers, newTransform, newWidth, newHeight) => {
+          subscribers.forEach(sub => {sub.unsubscribe();});
+          const newStore = derived([transformStore, widthStore, heightStore, ...newSubjects], reaction);
+          widthStore.set(newWidth);
+          heightStore.set(newHeight);
+          transformStore.set(newTransform);
+          store = resetStore(newStore, subscribers);
+        },
+        setTransform: (newTransform) => {
+          transformStore.set(newTransform);
+        },
+        setWidth: (newWidth) => {
+          widthStore.set(newWidth);
+        },
+        setHeight: (newHeight) => {
+          heightStore.set(newHeight);
+        },
+        setSubjects: (newSubjects) => {
+          subscribers.forEach(sub => {sub.unsubscribe();});
+          const newStore = derived([transformStore, widthStore, heightStore, ...newSubjects], reaction);
+          store = resetStore(newStore, subscribers);
+        },
+        subscribe: (callback) => {
+          console.log("camera subscribed");
+          return subscription(store, subscribers, callback)
+        },
+      }
+    }
+
     /* src/Geomancer.svelte generated by Svelte v3.20.1 */
 
     const { console: console_1 } = globals;
@@ -1099,52 +1340,36 @@ var app = (function () {
     	let canvas_1;
     	let canvas_1_width_value;
     	let canvas_1_height_value;
-    	let eventHandlers_action;
-    	let dispose;
 
     	const block = {
     		c: function create() {
     			canvas_1 = element("canvas");
     			this.c = noop;
-    			attr_dev(canvas_1, "id", /*sceneID*/ ctx[1]);
-    			attr_dev(canvas_1, "width", canvas_1_width_value = "" + (/*width*/ ctx[2] + "px"));
-    			attr_dev(canvas_1, "height", canvas_1_height_value = "" + (/*height*/ ctx[3] + "px"));
-    			add_location(canvas_1, file, 242, 0, 5520);
+    			attr_dev(canvas_1, "width", canvas_1_width_value = "" + (/*width*/ ctx[0] + "px"));
+    			attr_dev(canvas_1, "height", canvas_1_height_value = "" + (/*height*/ ctx[1] + "px"));
+    			add_location(canvas_1, file, 115, 0, 3007);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
-    		m: function mount(target, anchor, remount) {
+    		m: function mount(target, anchor) {
     			insert_dev(target, canvas_1, anchor);
-    			/*canvas_1_binding*/ ctx[25](canvas_1);
-    			if (remount) run_all(dispose);
-
-    			dispose = [
-    				action_destroyer(eventHandlers_action = eventHandlers.call(null, canvas_1, /*handlers*/ ctx[4])),
-    				listen_dev(canvas_1, "panZoomRotate", /*panZoomRotate_handler*/ ctx[26], false, false, false)
-    			];
+    			/*canvas_1_binding*/ ctx[15](canvas_1);
     		},
     		p: function update(ctx, [dirty]) {
-    			if (dirty & /*sceneID*/ 2) {
-    				attr_dev(canvas_1, "id", /*sceneID*/ ctx[1]);
-    			}
-
-    			if (dirty & /*width*/ 4 && canvas_1_width_value !== (canvas_1_width_value = "" + (/*width*/ ctx[2] + "px"))) {
+    			if (dirty & /*width*/ 1 && canvas_1_width_value !== (canvas_1_width_value = "" + (/*width*/ ctx[0] + "px"))) {
     				attr_dev(canvas_1, "width", canvas_1_width_value);
     			}
 
-    			if (dirty & /*height*/ 8 && canvas_1_height_value !== (canvas_1_height_value = "" + (/*height*/ ctx[3] + "px"))) {
+    			if (dirty & /*height*/ 2 && canvas_1_height_value !== (canvas_1_height_value = "" + (/*height*/ ctx[1] + "px"))) {
     				attr_dev(canvas_1, "height", canvas_1_height_value);
     			}
-
-    			if (eventHandlers_action && is_function(eventHandlers_action.update) && dirty & /*handlers*/ 16) eventHandlers_action.update.call(null, /*handlers*/ ctx[4]);
     		},
     		i: noop,
     		o: noop,
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(canvas_1);
-    			/*canvas_1_binding*/ ctx[25](null);
-    			run_all(dispose);
+    			/*canvas_1_binding*/ ctx[15](null);
     		}
     	};
 
@@ -1159,225 +1384,100 @@ var app = (function () {
     	return block;
     }
 
-    function eventHandlers(node, events) {
-    	for (const ev in events) {
-    		node.addEventListener(ev, events[ev]);
-    	}
-
-    	let prevEvents = events;
-
-    	return {
-    		update(newEvents) {
-    			for (const ev in prevEvents) {
-    				node.removeEventListener(ev, prevEvents[ev]);
-    			}
-
-    			for (const ev in newEvents) {
-    				node.addEventListener(ev, newEvents[ev]);
-    			}
-
-    			prevEvents = newEvents;
-    		},
-    		destroy() {
-    			for (const ev in prevEvents) {
-    				node.removeEventListener(ev, prevEvents[ev]);
-    			}
-    		}
-    	};
-    }
-
     function instance($$self, $$props, $$invalidate) {
-    	let $orderedSubjects;
-
-    	let { paths = {
-    		hexagon: [
-    			["moveTo", 2.5, 43.3],
-    			["lineTo", 26.25, 84.77],
-    			["lineTo", 73.75, 84.77],
-    			["lineTo", 97.5, 43.3],
-    			["lineTo", 73.75, 2.165],
-    			["lineTo", 26.25, 2.165],
-    			["closePath"]
-    		],
-    		boundaries: [["rect", 10, 10, 780, 780]]
-    	} } = $$props;
-
-    	let { pallettes = {
-    		black: {
-    			fillStyle: "black",
-    			lineWidth: 3,
-    			lineJoin: "round"
-    		},
-    		thinBlackLines: {
-    			lineWidth: 5,
-    			strokeStyle: "black",
-    			lineJoin: "round"
-    		}
-    	} } = $$props;
-
-    	let { layers = [
-    		{
-    			subjects: [
-    				{
-    					id: "loneHex",
-    					path: "hexagon",
-    					pallette: "black",
-    					transform: [1, 0, 0, 1, 100, 100],
-    					visible: true
-    				},
-    				{
-    					id: "boundary",
-    					path: "boundaries",
-    					pallette: "thinBlackLines",
-    					transform: [1, 0, 0, 1, 0, 0],
-    					visible: true
-    				}
-    			],
-    			layers: [],
-    			transform: [1, 0, 0, 1, 0, 0]
-    		}
-    	] } = $$props;
-
-    	let { sceneID = "geomancer-viewport" } = $$props;
     	let { width = 800 } = $$props;
     	let { height = 800 } = $$props;
-    	let { transform = [1, 0, 0, 1, 0, 0] } = $$props;
-    	let { extents = { left: 0, right: 800, top: 0, bottom: 800 } } = $$props;
 
-    	let { handlers = {
-    		mousedown: view.startPanning,
-    		mouseup: view.stopPanning,
-    		mouseout: view.stopPanning,
-    		mousemove: event => view.panning(event, width, height, extents, transform),
-    		wheel: event => view.zooming(event, width, height, extents, transform)
-    	} } = $$props;
+    	const hexPath = path([
+    		["moveTo", 2.5, 43.3],
+    		["lineTo", 26.25, 84.77],
+    		["lineTo", 73.75, 84.77],
+    		["lineTo", 97.5, 43.3],
+    		["lineTo", 73.75, 2.165],
+    		["lineTo", 26.25, 2.165],
+    		["closePath"]
+    	]);
 
-    	const pathsStore = writable(paths);
-    	const pallettesStore = writable(pallettes);
-    	const transformStore = writable(transform);
-    	const boxStore = writable({ width, height });
+    	const boundingPath = path([["rect", 10, 10, 780, 780]]);
 
-    	const viewportStore = derived([transformStore, boxStore], ([$transformStore, $boxStore]) => ({
-    		transform: $transformStore,
-    		box: measure.transformBox(measure.pathToBox(["rect", 0, 0, $boxStore.width, $boxStore.height]), $transformStore)
-    	}));
-
-    	const layerStore = writable(null);
-
-    	const orderedSubjects = derived(layerStore, $layerStore => {
-    		const os = [];
-    		if ($layerStore !== null) $layerStore.forEach(layer => subjects.order(layer, os));
-    		return os;
+    	const blackPallette = pallette({
+    		fillStyle: "black",
+    		lineWidth: 3,
+    		lineJoin: "round"
     	});
 
-    	validate_store(orderedSubjects, "orderedSubjects");
-    	component_subscribe($$self, orderedSubjects, value => $$invalidate(17, $orderedSubjects = value));
-    	const pathStores = {};
-    	const shapeStores = {};
-    	const palletteStores = {};
-    	const painterStores = {};
-    	const patternStores = {};
-    	const subjectStores = {};
-
-    	pathsStore.subscribe(paths => {
-    		for (const p in paths) {
-    			if (pathStores[p] === undefined) {
-    				const pathStore = writable(paths[p]);
-    				pathStores[p] = pathStore;
-
-    				shapeStores[p] = derived(pathStore, $pathStore => ({
-    					shape: measure.pathToCanvas($pathStore),
-    					box: measure.pathToBox($pathStore)
-    				}));
-    			} else {
-    				pathStores[p].set(paths[p]);
-    			}
-    		}
+    	const thinBlackPallette = pallette({
+    		lineWidth: 5,
+    		strokeStyle: "black",
+    		lineJoin: "round"
     	});
 
-    	pallettesStore.subscribe(pallettes => {
-    		for (const p in pallettes) {
-    			if (palletteStores[p] === undefined) {
-    				const palletteStore = writable(pallettes[p]);
-    				palletteStores[p] = palletteStore;
-    				painterStores[p] = derived(palletteStore, $palletteStore => style.palletteToPainter($palletteStore));
-    			} else {
-    				palletteStores[p].set(pallettes[p]);
-    			}
-    		}
-    	});
-
-    	layerStore.subscribe(layers => {
-    		if (layers === null) return;
-    		const patterns = {};
-    		layers.forEach(layer => subjects.resolve([1, 0, 0, 1, 0, 0], layer, patterns));
-
-    		for (const p in patterns) {
-    			if (patternStores[p] === undefined) {
-    				patternStores[p] = writable(patterns[p]);
-    			} else {
-    				patternStores[p].set(patterns[p]);
-    			}
-    		}
-
-    		for (const p in patterns) {
-    			if (subjectStores[p] === undefined) {
-    				const pattern = patterns[p];
-    				const patternStore = patternStores[p];
-    				const shape = shapeStores[pattern.path];
-    				const painter = painterStores[pattern.pallette];
-
-    				subjectStores[p] = derived([viewportStore, patternStore, shape, painter], ([$viewportStore, $patternStore, $shape, $painter]) => ({
-    					id: $patternStore.id,
-    					draw: $painter,
-    					shape: $shape.shape,
-    					transform: $patternStore.transform,
-    					visible: $patternStore.visible, // && tracer.boxesIntersect(($viewportStore).box, ($shape).box)
-    					
-    				}));
-    			}
-    		}
-    	});
-
-    	function draw(context) {
-    		console.time("draw");
-    		context.setTransform(1, 0, 0, 1, 0, 0);
-    		context.clearRect(0, 0, width, height);
-    		context.setTransform(...transform);
-
-    		$orderedSubjects.map(s => {
-    			return subjectStores[s];
-    		}).filter(s => s !== undefined).map(s => get_store_value(s)).filter(s => s.visible).forEach(subject => {
-    			context.save();
-    			context.transform(...subject.transform);
-    			subject.draw(context, subject.shape);
-    			context.restore();
-    		});
-
-    		console.timeEnd("draw");
-    	}
-
+    	const hexPattern = pattern$1(hexPath, blackPallette);
+    	const boundaryPattern = pattern$1(boundingPath, thinBlackPallette);
+    	const boundarySubject = subject(boundaryPattern, [1, 0, 0, 1, 0, 0], true);
+    	const hexSubject = subject(hexPattern, [1, 0, 0, 1, 100, 100], true);
+    	const baseLayer = layer([boundarySubject, hexSubject], [1, 0, 0, 1, 0, 0], true);
+    	const geomancer = camera([baseLayer], [1, 0, 0, 1, 0, 0], width, height);
     	let canvas;
+    	const context = writable(null);
 
+    	const paintStore = derived([context, geomancer], ([context, geomancer]) => {
+    		return () => {
+    			console.log("painting?");
+
+    			if (context) {
+    				console.log("painting!");
+    				context.clearRect(0, 0, width, height);
+    				geomancer.draw(context);
+    			}
+    		};
+    	});
+
+    	paintStore.subscribe(draw => draw());
+
+    	// export let handlers = {
+    	// 	mousedown: view.startPanning,
+    	// 	mouseup: view.stopPanning,
+    	// 	mouseout: view.stopPanning,
+    	// 	mousemove: view.panning,
+    	// 	wheel: view.zooming,
+    	// }
+    	// function eventHandlers (node, events) {
+    	// 	let context = {
+    	// 		element: node,
+    	// 		extents: extentsStore,
+    	// 		width: widthStore,
+    	// 		height: heightStore,
+    	// 		transform: transformStore,
+    	// 		paths: pathsStore,
+    	// 		pallettes: pallettesStore,
+    	// 		layers: layersStore,
+    	// 	}
+    	// 	let handlers = []
+    	// 	for (const ev in events) {
+    	// 		handlers.push([ev, (event) => events[ev](event, context)])
+    	// 	}
+    	// 	handlers.forEach(([ev, handler]) => node.addEventListener(ev, handler))
+    	// 	return {
+    	// 		update (newHandlers) {
+    	// 			handlers.forEach(([ev, handler]) => node.removeEventListener(ev, handler))
+    	// 			handlers = []
+    	// 			for (const ev in newHandlers) {
+    	// 				handlers.push([ev, (event) => events[ev](event, context)])
+    	// 			}
+    	// 			handlers.forEach(([ev, handler]) => node.addEventListener(ev, handler))
+    	// 		},
+    	// 		destroy () {
+    	// 			handlers.forEach(([ev, handler]) => node.removeEventListener(ev, handler))
+    	// 		}
+    	// 	}
+    	// }
     	onMount(() => {
-    		draw(canvas.getContext("2d"));
+    		console.log(get_store_value(geomancer));
+    		context.set(canvas.getContext("2d"));
     	});
 
-    	afterUpdate(() => {
-    		draw(canvas.getContext("2d"));
-    	});
-
-    	const writable_props = [
-    		"paths",
-    		"pallettes",
-    		"layers",
-    		"sceneID",
-    		"width",
-    		"height",
-    		"transform",
-    		"extents",
-    		"handlers"
-    	];
+    	const writable_props = ["width", "height"];
 
     	Object.keys($$props).forEach(key => {
     		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console_1.warn(`<geomancer-scene> was created with unknown prop '${key}'`);
@@ -1388,28 +1488,26 @@ var app = (function () {
 
     	function canvas_1_binding($$value) {
     		binding_callbacks[$$value ? "unshift" : "push"](() => {
-    			$$invalidate(5, canvas = $$value);
+    			$$invalidate(2, canvas = $$value);
     		});
     	}
 
-    	const panZoomRotate_handler = change => $$invalidate(0, transform = change);
-
     	$$self.$set = $$props => {
-    		if ("paths" in $$props) $$invalidate(7, paths = $$props.paths);
-    		if ("pallettes" in $$props) $$invalidate(8, pallettes = $$props.pallettes);
-    		if ("layers" in $$props) $$invalidate(9, layers = $$props.layers);
-    		if ("sceneID" in $$props) $$invalidate(1, sceneID = $$props.sceneID);
-    		if ("width" in $$props) $$invalidate(2, width = $$props.width);
-    		if ("height" in $$props) $$invalidate(3, height = $$props.height);
-    		if ("transform" in $$props) $$invalidate(0, transform = $$props.transform);
-    		if ("extents" in $$props) $$invalidate(10, extents = $$props.extents);
-    		if ("handlers" in $$props) $$invalidate(4, handlers = $$props.handlers);
+    		if ("width" in $$props) $$invalidate(0, width = $$props.width);
+    		if ("height" in $$props) $$invalidate(1, height = $$props.height);
     	};
 
     	$$self.$capture_state = () => ({
     		writable,
     		derived,
     		get: get_store_value,
+    		onMount,
+    		path,
+    		pallette,
+    		pattern: pattern$1,
+    		subject,
+    		layer,
+    		camera,
     		style,
     		scene,
     		measure,
@@ -1418,122 +1516,57 @@ var app = (function () {
     		handles,
     		view,
     		subjects,
-    		onMount,
-    		afterUpdate,
-    		tick,
-    		paths,
-    		pallettes,
-    		layers,
-    		sceneID,
     		width,
     		height,
-    		transform,
-    		extents,
-    		handlers,
-    		pathsStore,
-    		pallettesStore,
-    		transformStore,
-    		boxStore,
-    		viewportStore,
-    		layerStore,
-    		orderedSubjects,
-    		pathStores,
-    		shapeStores,
-    		palletteStores,
-    		painterStores,
-    		patternStores,
-    		subjectStores,
-    		draw,
-    		eventHandlers,
+    		hexPath,
+    		boundingPath,
+    		blackPallette,
+    		thinBlackPallette,
+    		hexPattern,
+    		boundaryPattern,
+    		boundarySubject,
+    		hexSubject,
+    		baseLayer,
+    		geomancer,
     		canvas,
-    		$orderedSubjects
+    		context,
+    		paintStore
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ("paths" in $$props) $$invalidate(7, paths = $$props.paths);
-    		if ("pallettes" in $$props) $$invalidate(8, pallettes = $$props.pallettes);
-    		if ("layers" in $$props) $$invalidate(9, layers = $$props.layers);
-    		if ("sceneID" in $$props) $$invalidate(1, sceneID = $$props.sceneID);
-    		if ("width" in $$props) $$invalidate(2, width = $$props.width);
-    		if ("height" in $$props) $$invalidate(3, height = $$props.height);
-    		if ("transform" in $$props) $$invalidate(0, transform = $$props.transform);
-    		if ("extents" in $$props) $$invalidate(10, extents = $$props.extents);
-    		if ("handlers" in $$props) $$invalidate(4, handlers = $$props.handlers);
-    		if ("canvas" in $$props) $$invalidate(5, canvas = $$props.canvas);
+    		if ("width" in $$props) $$invalidate(0, width = $$props.width);
+    		if ("height" in $$props) $$invalidate(1, height = $$props.height);
+    		if ("canvas" in $$props) $$invalidate(2, canvas = $$props.canvas);
     	};
 
     	if ($$props && "$$inject" in $$props) {
     		$$self.$inject_state($$props.$$inject);
     	}
 
-    	$$self.$$.update = () => {
-    		if ($$self.$$.dirty & /*paths*/ 128) {
-    			 pathsStore.set(paths);
-    		}
-
-    		if ($$self.$$.dirty & /*pallettes*/ 256) {
-    			 pallettesStore.set(pallettes);
-    		}
-
-    		if ($$self.$$.dirty & /*transform*/ 1) {
-    			 transformStore.set(transform);
-    		}
-
-    		if ($$self.$$.dirty & /*width, height*/ 12) {
-    			 boxStore.set({ width, height });
-    		}
-
-    		if ($$self.$$.dirty & /*layers*/ 512) {
-    			 layerStore.set(layers);
-    		}
-    	};
-
     	return [
-    		transform,
-    		sceneID,
     		width,
     		height,
-    		handlers,
     		canvas,
-    		orderedSubjects,
-    		paths,
-    		pallettes,
-    		layers,
-    		extents,
-    		pathStores,
-    		shapeStores,
-    		palletteStores,
-    		painterStores,
-    		patternStores,
-    		subjectStores,
-    		$orderedSubjects,
-    		pathsStore,
-    		pallettesStore,
-    		transformStore,
-    		boxStore,
-    		viewportStore,
-    		layerStore,
-    		draw,
-    		canvas_1_binding,
-    		panZoomRotate_handler
+    		hexPath,
+    		boundingPath,
+    		blackPallette,
+    		thinBlackPallette,
+    		hexPattern,
+    		boundaryPattern,
+    		boundarySubject,
+    		hexSubject,
+    		baseLayer,
+    		geomancer,
+    		context,
+    		paintStore,
+    		canvas_1_binding
     	];
     }
 
     class Geomancer extends SvelteElement {
     	constructor(options) {
     		super();
-
-    		init(this, { target: this.shadowRoot }, instance, create_fragment, safe_not_equal, {
-    			paths: 7,
-    			pallettes: 8,
-    			layers: 9,
-    			sceneID: 1,
-    			width: 2,
-    			height: 3,
-    			transform: 0,
-    			extents: 10,
-    			handlers: 4
-    		});
+    		init(this, { target: this.shadowRoot }, instance, create_fragment, safe_not_equal, { width: 0, height: 1 });
 
     		if (options) {
     			if (options.target) {
@@ -1548,57 +1581,11 @@ var app = (function () {
     	}
 
     	static get observedAttributes() {
-    		return [
-    			"paths",
-    			"pallettes",
-    			"layers",
-    			"sceneID",
-    			"width",
-    			"height",
-    			"transform",
-    			"extents",
-    			"handlers"
-    		];
-    	}
-
-    	get paths() {
-    		return this.$$.ctx[7];
-    	}
-
-    	set paths(paths) {
-    		this.$set({ paths });
-    		flush();
-    	}
-
-    	get pallettes() {
-    		return this.$$.ctx[8];
-    	}
-
-    	set pallettes(pallettes) {
-    		this.$set({ pallettes });
-    		flush();
-    	}
-
-    	get layers() {
-    		return this.$$.ctx[9];
-    	}
-
-    	set layers(layers) {
-    		this.$set({ layers });
-    		flush();
-    	}
-
-    	get sceneID() {
-    		return this.$$.ctx[1];
-    	}
-
-    	set sceneID(sceneID) {
-    		this.$set({ sceneID });
-    		flush();
+    		return ["width", "height"];
     	}
 
     	get width() {
-    		return this.$$.ctx[2];
+    		return this.$$.ctx[0];
     	}
 
     	set width(width) {
@@ -1607,38 +1594,11 @@ var app = (function () {
     	}
 
     	get height() {
-    		return this.$$.ctx[3];
+    		return this.$$.ctx[1];
     	}
 
     	set height(height) {
     		this.$set({ height });
-    		flush();
-    	}
-
-    	get transform() {
-    		return this.$$.ctx[0];
-    	}
-
-    	set transform(transform) {
-    		this.$set({ transform });
-    		flush();
-    	}
-
-    	get extents() {
-    		return this.$$.ctx[10];
-    	}
-
-    	set extents(extents) {
-    		this.$set({ extents });
-    		flush();
-    	}
-
-    	get handlers() {
-    		return this.$$.ctx[4];
-    	}
-
-    	set handlers(handlers) {
-    		this.$set({ handlers });
     		flush();
     	}
     }
