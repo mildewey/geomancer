@@ -36,6 +36,9 @@ var app = (function () {
         subscribe(store, _ => value = _)();
         return value;
     }
+    function action_destroyer(action_result) {
+        return action_result && is_function(action_result.destroy) ? action_result.destroy : noop;
+    }
     function insert(target, node, anchor) {
         target.insertBefore(node, anchor || null);
     }
@@ -142,8 +145,6 @@ var app = (function () {
             block.i(local);
         }
     }
-
-    const globals = (typeof window !== 'undefined' ? window : global);
     function mount_component(component, target, anchor) {
         const { fragment, on_mount, on_destroy, after_update } = component.$$;
         fragment && fragment.m(target, anchor);
@@ -302,6 +303,257 @@ var app = (function () {
         }
     }
 
+    // Unique ID creation requires a high quality random # generator. In the browser we therefore
+    // require the crypto API and do not support built-in fallback to lower quality random number
+    // generators (like Math.random()).
+    // getRandomValues needs to be invoked in a context where "this" is a Crypto implementation. Also,
+    // find the complete implementation of crypto (msCrypto) on IE11.
+    var getRandomValues = typeof crypto !== 'undefined' && crypto.getRandomValues && crypto.getRandomValues.bind(crypto) || typeof msCrypto !== 'undefined' && typeof msCrypto.getRandomValues === 'function' && msCrypto.getRandomValues.bind(msCrypto);
+    var rnds8 = new Uint8Array(16);
+    function rng() {
+      if (!getRandomValues) {
+        throw new Error('crypto.getRandomValues() not supported. See https://github.com/uuidjs/uuid#getrandomvalues-not-supported');
+      }
+
+      return getRandomValues(rnds8);
+    }
+
+    /**
+     * Convert array of 16 byte values to UUID string format of the form:
+     * XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+     */
+    var byteToHex = [];
+
+    for (var i = 0; i < 256; ++i) {
+      byteToHex.push((i + 0x100).toString(16).substr(1));
+    }
+
+    function bytesToUuid(buf, offset_) {
+      var offset = offset_ || 0; // Note: Be careful editing this code!  It's been tuned for performance
+      // and works in ways you may not expect. See https://github.com/uuidjs/uuid/pull/434
+
+      return (byteToHex[buf[offset + 0]] + byteToHex[buf[offset + 1]] + byteToHex[buf[offset + 2]] + byteToHex[buf[offset + 3]] + '-' + byteToHex[buf[offset + 4]] + byteToHex[buf[offset + 5]] + '-' + byteToHex[buf[offset + 6]] + byteToHex[buf[offset + 7]] + '-' + byteToHex[buf[offset + 8]] + byteToHex[buf[offset + 9]] + '-' + byteToHex[buf[offset + 10]] + byteToHex[buf[offset + 11]] + byteToHex[buf[offset + 12]] + byteToHex[buf[offset + 13]] + byteToHex[buf[offset + 14]] + byteToHex[buf[offset + 15]]).toLowerCase();
+    }
+
+    function v4(options, buf, offset) {
+      options = options || {};
+      var rnds = options.random || (options.rng || rng)(); // Per 4.4, set bits for version and `clock_seq_hi_and_reserved`
+
+      rnds[6] = rnds[6] & 0x0f | 0x40;
+      rnds[8] = rnds[8] & 0x3f | 0x80; // Copy bytes to buffer, if provided
+
+      if (buf) {
+        offset = offset || 0;
+
+        for (var i = 0; i < 16; ++i) {
+          buf[offset + i] = rnds[i];
+        }
+
+        return buf;
+      }
+
+      return bytesToUuid(rnds);
+    }
+
+    const subscriber_queue = [];
+    /**
+     * Creates a `Readable` store that allows reading by subscription.
+     * @param value initial value
+     * @param {StartStopNotifier}start start and stop notifications for subscriptions
+     */
+    function readable(value, start) {
+        return {
+            subscribe: writable(value, start).subscribe,
+        };
+    }
+    /**
+     * Create a `Writable` store that allows both updating and reading by subscription.
+     * @param {*=}value initial value
+     * @param {StartStopNotifier=}start start and stop notifications for subscriptions
+     */
+    function writable(value, start = noop) {
+        let stop;
+        const subscribers = [];
+        function set(new_value) {
+            if (safe_not_equal(value, new_value)) {
+                value = new_value;
+                if (stop) { // store is ready
+                    const run_queue = !subscriber_queue.length;
+                    for (let i = 0; i < subscribers.length; i += 1) {
+                        const s = subscribers[i];
+                        s[1]();
+                        subscriber_queue.push(s, value);
+                    }
+                    if (run_queue) {
+                        for (let i = 0; i < subscriber_queue.length; i += 2) {
+                            subscriber_queue[i][0](subscriber_queue[i + 1]);
+                        }
+                        subscriber_queue.length = 0;
+                    }
+                }
+            }
+        }
+        function update(fn) {
+            set(fn(value));
+        }
+        function subscribe(run, invalidate = noop) {
+            const subscriber = [run, invalidate];
+            subscribers.push(subscriber);
+            if (subscribers.length === 1) {
+                stop = start(set) || noop;
+            }
+            run(value);
+            return () => {
+                const index = subscribers.indexOf(subscriber);
+                if (index !== -1) {
+                    subscribers.splice(index, 1);
+                }
+                if (subscribers.length === 0) {
+                    stop();
+                    stop = null;
+                }
+            };
+        }
+        return { set, update, subscribe };
+    }
+    function derived(stores, fn, initial_value) {
+        const single = !Array.isArray(stores);
+        const stores_array = single
+            ? [stores]
+            : stores;
+        const auto = fn.length < 2;
+        return readable(initial_value, (set) => {
+            let inited = false;
+            const values = [];
+            let pending = 0;
+            let cleanup = noop;
+            const sync = () => {
+                if (pending) {
+                    return;
+                }
+                cleanup();
+                const result = fn(single ? values[0] : values, set);
+                if (auto) {
+                    set(result);
+                }
+                else {
+                    cleanup = is_function(result) ? result : noop;
+                }
+            };
+            const unsubscribers = stores_array.map((store, i) => subscribe(store, (value) => {
+                values[i] = value;
+                pending &= ~(1 << i);
+                if (inited) {
+                    sync();
+                }
+            }, () => {
+                pending |= (1 << i);
+            }));
+            inited = true;
+            sync();
+            return function stop() {
+                run_all(unsubscribers);
+                cleanup();
+            };
+        });
+    }
+
+    const defaults = {
+      fillStyle: null,
+      strokeStyle: null,
+      lineWidth: 1,
+      lineCap: 'butt',
+      lineJoin: 'miter',
+      miterLimit: 10.0,
+      lineDash: [],
+      lineDashOffset: 0,
+      shadowOffsetX: 0,
+      shadowOffsetY: 0,
+      shadowBlur: 0,
+      shadowColor: 'transparent',
+      fill: 'nonzero',
+      font: 'sans-serif',
+      textAlign: 'start',
+      textBaseline: 'alphabetic',
+      direction: 'inherit'
+    };
+
+    function palletteToPainter(options) {
+      let pallette = {...defaults, ...options};
+      function painter(context, path) {
+        context.lineWidth = pallette.lineWidth;
+        context.lineCap = pallette.lineCap;
+        context.lineJoin = pallette.lineJoin;
+        context.miterLimit = pallette.miterLimit;
+        context.setLineDash(pallette.lineDash);
+        context.lineDashOffset = pallette.lineDashOffset;
+        context.font = pallette.font;
+        context.textAlign = pallette.textAlign;
+        context.textBaseline = pallette.textBaseline;
+        context.direction = pallette.direction;
+        context.shadowOffsetX = pallette.shadowOffsetX;
+        context.shadowOffsetY = pallette.shadowOffsetY;
+        context.shadowBlur = pallette.shadowBlur;
+        context.shadowColor = pallette.shadowColor;
+        context.fillStyle = pallette.fillStyle;
+        context.strokeStyle = pallette.strokeStyle;
+
+        if (path.text) {
+          if (pallette.fillStyle) context.fillText(path.text, path.x, path.y, path.maxWidth);
+          if (pallette.strokeStyle) context.strokeText(path.text, path.x, path.y, path.maxWidth);
+        } else {
+          if (pallette.fillStyle) context.fill(path);
+          if (pallette.strokeStyle) context.stroke(path);
+        }
+      }
+
+      return painter
+    }
+
+    function linearGradient(context, start, end, stops) {
+      let grad = context.createLinearGradient(start.x, start.y, end.x, end.y);
+      stops.forEach(({loc, color}) => grad.addColorStop(loc, color));
+
+      return grad
+    }
+
+    function radialGradient(context, start, end, stops) {
+      let grad = context.createRadialGradient(start.x, start.y, start.radius, end.x, end.y, end.radius);
+      stops.forEach(({loc, color}) => grad.addColorStop(loc, color));
+
+      return grad
+    }
+
+    function pattern(context, url, type) {
+      let img = new Image();
+      img.src(url);
+      let ptrn = context.createPattern(img, type);
+
+      return ptrn
+    }
+
+    function pallettesToPainters (pallettes) {
+      let painters = {};
+      for (let id in pallettes) {
+        let painter = palletteToPainter(pallettes[id]);
+        painters[id] = painter;
+      }
+      return painters
+    }
+
+    var style = {
+      linearGradient,
+      radialGradient,
+      pattern,
+      palletteToPainter,
+      pallettesToPainters
+    };
+
+    var style$1 = /*#__PURE__*/Object.freeze({
+        __proto__: null,
+        'default': style
+    });
+
     const validate = {
       moveTo: params => params.length === 2 ? 'moveTo must have 2 parameters' : null,
       lineTo: params => params.length === 2 ? 'lineTo must have 2 parameters' : null,
@@ -442,7 +694,6 @@ var app = (function () {
 
       let p2d = new Path2D();
       path.forEach(subpath => {
-        console.log(subpath);
         p2d[subpath[0]](...subpath.slice(1));
       });
 
@@ -494,130 +745,6 @@ var app = (function () {
         __proto__: null,
         'default': measure
     });
-
-    function order (layer, subjects = []) {
-      layer.subjects.forEach(subject => {
-    		subjects.push(subject.id);
-      });
-
-      layer.layers.forEach(subLayer => {
-        order(subLayer, subjects);
-      });
-
-      return subjects
-    }
-
-
-    function resolve (transform, layer, subjects = {}) {
-      const layerTransform = measure.applyTransform(transform, layer.transform);
-
-      layer.subjects.forEach(subject => {
-    		let subjectTransform = measure.applyTransform(layerTransform, subject.transform);
-    		subjects[subject.id] = {
-          ...subject,
-          transform: subjectTransform
-        };
-      });
-
-      layer.layers.forEach(subLayer => {
-        resolve(reference, layerTransform, subLayer);
-      });
-
-      return subjects
-    }
-
-
-    var subjects = {
-      order,
-      resolve
-    };
-
-    var events = {
-
-    };
-
-    const lastX = {};
-    const lastY = {};
-    const isPanning = {};
-
-    function enforceBoundaries (width, height, extents, transform) {
-      let zoom = transform[0];
-      let x = transform[4];
-      let y = transform[5];
-      let maxX = -extents.left*zoom;
-      let minX = width-extents.right*zoom;
-      let maxY = -extents.top*zoom;
-      let minY = height-extents.bottom*zoom;
-
-      if (x < minX) transform[4] = minX;
-      if (x > maxX) transform[4] = maxX;
-      if (y < minY) transform[5] = minY;
-      if (y > maxY) transform[5] = maxY;
-    }
-
-    function stableZoom (x, y, zoom, transform) {
-      let target = [...transform];
-      target[0] = zoom;
-      target[3] = zoom;
-      let factor = zoom/transform[0];
-      target[4] = x - factor * (x-transform[4]);
-      target[5] = y - factor * (y-transform[5]);
-      return target
-    }
-
-    function startPanning (mouse, context) {
-      lastX[context.element.id] = mouse.clientX;
-      lastY[context.element.id] = mouse.clientY;
-      isPanning[context.element.id] = true;
-    }
-
-    function panning (mouse, context) {
-      if (!isPanning[context.element.id]) {
-        return;
-      }
-      let transform = context.transform;
-      let target = [...$transform];
-      target[4] = transform[4] + mouse.clientX - lastX[context.element.id];
-      target[5] = transform[5] + mouse.clientY - lastY[context.element.id];
-      lastX[context.element.id] = mouse.clientX;
-      lastY[context.element.id] = mouse.clientY;
-      enforceBoundaries(width, height, extents, target);
-      context.transform.set(target);
-    }
-
-    function stopPanning (mouse, node) {
-      isPanning[node.id] = false;
-    }
-
-    function zooming (mouse, node, width, height, extents, transform) {
-      console.log(width, height, extents, transform);
-      let delta = -Math.sign(mouse.deltaY);
-      let zoom = transform[0] * (1.2 ** delta);
-      let minZoom = Math.max(
-        width/(extents.right - extents.left),
-        height/(extents.bottom - extents.top),
-        0.5
-      );
-      if (zoom > 5) zoom = 5;
-      if (zoom < minZoom) zoom = minZoom;
-
-      let target = stableZoom(mouse.offsetX, mouse.offsetY, zoom, transform);
-      enforceBoundaries(width, height, extents, target);
-
-      mouse.preventDefault();
-      mouse.stopPropagation();
-      console.log(target);
-      node.dispatchEvent(new CustomEvent("panZoomRotate", {transform: target}));
-    }
-
-    var view = {
-      enforceBoundaries,
-      stableZoom,
-      startPanning,
-      panning,
-      stopPanning,
-      zooming,
-    };
 
     function sorter (a, b) {
       if (a.index < b.index) return -1
@@ -756,21 +883,7 @@ var app = (function () {
       return true
     }
 
-    var tracer$1 = {
-      tracer,
-      insert: insert$1,
-      concat,
-      intersectPoint,
-      intersectBox,
-      boxesIntersect,
-    };
-
-    var tracer$2 = /*#__PURE__*/Object.freeze({
-        __proto__: null,
-        'default': tracer$1
-    });
-
-    function generateHitChecker(context, path, transform) {
+    function generateHitChecker$1(context, path, transform) {
       return (x, y) => {
         context.save();
         context.setTransform(...transform);
@@ -779,6 +892,434 @@ var app = (function () {
         return inPath
       }
     }
+
+    var tracer$1 = {
+      tracer,
+      insert: insert$1,
+      concat,
+      intersectPoint,
+      intersectBox,
+      boxesIntersect,
+      generateHitChecker: generateHitChecker$1,
+    };
+
+    var tracer$2 = /*#__PURE__*/Object.freeze({
+        __proto__: null,
+        'default': tracer$1
+    });
+
+    function path(instructions) {
+      const pathStore = writable(instructions);
+      let shapeStore = derived(pathStore, instructions =>({
+        shape: measure.pathToCanvas(instructions),
+        box: measure.pathToBox(instructions),
+        instructions: instructions
+      }));
+
+      return {
+        set: newInstructions => pathStore.set(newInstructions),
+        subscribe: callback => shapeStore.subscribe(callback)
+      }
+    }
+
+    function pallette(styling) {
+      const palletteStore = writable(styling);
+      let painterStore = derived(palletteStore, styling => ({
+        draw: style.palletteToPainter(styling),
+        styling
+      }));
+
+      return {
+        set: newStyle => palletteStore.set(newStyle),
+        subscribe: callback => painterStore.subscribe(callback)
+      }
+    }
+
+    function resetStore(store, subscribers) {
+      subscribers.forEach(sub => {
+        sub.unsubscribe = store.subscribe(sub.callback);
+      });
+      return store
+    }
+
+    function subscription(store, subscribers, callback) {
+      const index = v4();
+      const unsubscribe = store.subscribe(callback);
+      subscribers[index] = {callback, unsubscribe};
+
+      return () => {
+        subscribers[index].unsubscribe();
+        delete subscribers[index];
+      }
+    }
+
+    function pattern$1(path, pallette) {
+      function reaction([path, pallette]) {
+        return {
+          draw: context => pallette.draw(context, path.shape),
+          path,
+          pallette
+        }
+      }
+
+      let store = derived([path, pallette], reaction);
+      const subscribers = {};
+
+      return {
+        set: (newPath, newPallette) => {
+          path = newPath;
+          pallette = newPallette;
+          store = resetStore(derived([path, pallette], reaction), subscribers);
+        },
+        setPath: (newPath) => {
+          path = newPath;
+          store = resetStore(derived([path, pallette], reaction), subscribers);
+        },
+        setPallette: (newPallette) => {
+          pallette = newPallette;
+          store = resetStore(derived([path, pallette], reaction), subscribers);
+        },
+        subscribe: (callback) => {
+          return subscription(store, subscribers, callback)
+        }
+      }
+    }
+
+    function subject(pattern, transform, visible, trace=null) {
+      const transformStore = writable(transform);
+      const visibleStore = writable(visible);
+
+      function reaction([pattern, transform, visible]) {
+        return {
+          draw: (context, viewport, hull) => {
+            context.save();
+            context.transform(...transform);
+            const t = context.getTransform();
+            const currentTransform = [t.a, t.b, t.c, t.d, t.e, t.f];
+            const subjectBox = measure.transformBox(pattern.path.box, currentTransform);
+            if (trace) {
+              tracer$1.insert(hull, {...subjectBox, value: trace, check: tracer$1.generateHitChecker(context, pattern.path.shape, currentTransform)});
+            }
+            if (visible && tracer$1.boxesIntersect(viewport, subjectBox)) {
+              pattern.draw(context);
+              context.restore();
+            }
+          },
+          pattern,
+          transform,
+          visible
+        }
+      }
+
+      let store = derived([pattern, transformStore, visibleStore], reaction);
+      const subscribers = {};
+
+      return {
+        set: (newPattern, newTransform, newVisible) => {
+          subscribers.forEach(sub => {sub.unsubscribe();});
+          const newStore = derived([newPattern, transformStore, visibleStore], reaction);
+          transformStore.set(newTransform);
+          visibleStore.set(newVisible);
+          store = resetStore(newStore, subscribers);
+        },
+        setTransform: (newTransform) => {
+          transformStore.set(newTransform);
+        },
+        setVisible: (newVisible) => {
+          visibleStore.set(newVisible);
+        },
+        setPattern: (newPattern) => {
+          subscribers.forEach(sub => {sub.unsubscribe();});
+          store = resetStore(derived([newPattern, transformStore, visibleStore], reaction));
+        },
+        subscribe: (callback) => {
+          return subscription(store, subscribers, callback)
+        }
+      }
+    }
+
+    function frame(subjects, transform, visible) {
+      const transformStore = writable(transform);
+      const visibleStore = writable(visible);
+
+      function reaction([transform, visible, ...subjects]) {
+        return {
+          draw: (context, viewport, hull) => {
+            if (visible) {
+              context.save();
+              context.transform(...transform);
+              subjects.forEach(subject => subject.draw(context, viewport, hull));
+              context.restore();
+            }
+          },
+          transform,
+          visible,
+          subjects
+        }
+      }
+
+      let store = derived([transformStore, visibleStore, ...subjects], reaction);
+      const subscribers = {};
+
+      return {
+        set: (newSubjects, newTransform, newVisible) => {
+          subscribers.forEach(sub => {sub.unsubscribe();});
+          const newStore = derived([transformStore, visibleStore, ...newSubjects], reaction);
+          transformStore.set(newTransform);
+          visibleStore.set(newVisible);
+          store = resetStore(newStore, subscribers);
+        },
+        setTransform: (newTransform) => {
+          transformStore.set(newTransform);
+        },
+        setVisible: (newVisible) => {
+          visibleStore.set(newVisible);
+        },
+        setSubjects: (newSubjects) => {
+          subscribers.forEach(sub => {sub.unsubscribe();});
+          const newStore = derived([transformStore, visibleStore, ...newSubjects], reaction);
+          store = resetStore(newStore, subscribers);
+        },
+        subscribe: (callback) => {
+          return subscription(store, subscribers, callback)
+        }
+      }
+    }
+
+    function camera(subjects, transform, width, height) {
+      const transformStore = writable(transform);
+      const widthStore = writable(width);
+      const heightStore = writable(height);
+      let hull = tracer$1.tracer();
+
+      function reaction([transform, width, height, ...subjects]) {
+        const viewport = measure.transformBox({min: {x: 0, y: 0}, max: {x: width, y: height}}, transform);
+        return {
+          draw: (context) => {
+            context.setTransform(...transform);
+            context.save();
+            hull = tracer$1.tracer();
+            subjects.forEach(subject => subject.draw(context, viewport, hull));
+            context.restore();
+            return hull
+          },
+          transform,
+          width,
+          height,
+          subjects,
+          itemsAt: (x, y) => {
+            return tracer$1.intersectPoint(hull, {x, y})
+          }
+        }
+      }
+
+      let store = derived([transformStore, widthStore, heightStore, ...subjects], reaction);
+      const subscribers = {};
+
+      return {
+        set: (newLayers, newTransform, newWidth, newHeight) => {
+          subscribers.forEach(sub => {sub.unsubscribe();});
+          const newStore = derived([transformStore, widthStore, heightStore, ...newSubjects], reaction);
+          widthStore.set(newWidth);
+          heightStore.set(newHeight);
+          transformStore.set(newTransform);
+          store = resetStore(newStore, subscribers);
+        },
+        setTransform: (newTransform) => {
+          transformStore.set(newTransform);
+        },
+        setWidth: (newWidth) => {
+          widthStore.set(newWidth);
+        },
+        setHeight: (newHeight) => {
+          heightStore.set(newHeight);
+        },
+        setSubjects: (newSubjects) => {
+          subscribers.forEach(sub => {sub.unsubscribe();});
+          const newStore = derived([transformStore, widthStore, heightStore, ...newSubjects], reaction);
+          store = resetStore(newStore, subscribers);
+        },
+        subscribe: (callback) => {
+          return subscription(store, subscribers, callback)
+        },
+      }
+    }
+
+    var events = {
+
+    };
+
+    const lastX = {};
+    const lastY = {};
+    const isPanning = {};
+
+    function enforceBoundaries (width, height, transform, extents, maxZoom=null) {
+      let zoom = transform[0];
+      let minZoom = Math.max(width/(extents.right-extents.left), height/(extents.bottom-extents.top));
+
+      if (zoom < minZoom) {
+        zoom = minZoom;
+      } else if (maxZoom && zoom > maxZoom) {
+        zoom = maxZoom;
+      }
+      transform[0] = zoom;
+      transform[3] = zoom;
+
+      let x = transform[4];
+      let y = transform[5];
+      let maxX = -extents.left*zoom;
+      let minX = width-extents.right*zoom;
+      let maxY = -extents.top*zoom;
+      let minY = height-extents.bottom*zoom;
+
+      if (x < minX) transform[4] = minX;
+      if (x > maxX) transform[4] = maxX;
+      if (y < minY) transform[5] = minY;
+      if (y > maxY) transform[5] = maxY;
+    }
+
+    function stableZoom (x, y, zoom, transform) {
+      let target = [...transform];
+      target[0] = zoom;
+      target[3] = zoom;
+      let factor = zoom/transform[0];
+      target[4] = x - factor * (x-transform[4]);
+      target[5] = y - factor * (y-transform[5]);
+      return target
+    }
+
+    function startPanning (x, y, id) {
+      lastX[id] = x;
+      lastY[id] = y;
+      isPanning[id] = true;
+    }
+
+    function panning (x, y, transform, id) {
+      if (!isPanning[id]) {
+        return transform;
+      }
+      let target = [...transform];
+      target[4] = transform[4] + x - lastX[id];
+      target[5] = transform[5] + y - lastY[id];
+      lastX[id] = x;
+      lastY[id] = y;
+      return target
+    }
+
+    function stopPanning (id) {
+      isPanning[id] = false;
+    }
+
+    function mouseZoom (mouse, transform, speed=1.2) {
+      let zoom = transform[0] * (speed ** -Math.sign(mouse.deltaY));
+      mouse.preventDefault();
+      mouse.stopPropagation();
+
+      return stableZoom(mouse.offsetX, mouse.offsetY, zoom, transform)
+    }
+
+    var view = {
+      enforceBoundaries,
+      stableZoom,
+      startPanning,
+      panning,
+      stopPanning,
+      mouseZoom
+    };
+
+    const hexPath = path([
+      ['moveTo', 2.5, 43.3],
+      ['lineTo', 26.25, 84.77],
+      ['lineTo', 73.75, 84.77],
+      ['lineTo', 97.5, 43.3],
+      ['lineTo', 73.75, 2.165],
+      ['lineTo', 26.25, 2.165],
+      ['closePath'],
+    ]);
+    const boundingPath = path([['rect', 10, 10, 780, 780]]);
+    const blackPallette = pallette({
+      fillStyle: 'black',
+      lineWidth: 3,
+      lineJoin: 'round'
+    });
+    const thinBlackPallette = pallette({
+      lineWidth: 5,
+      strokeStyle: 'black',
+      lineJoin: 'round'
+    });
+    const hexPattern = pattern$1(hexPath, blackPallette);
+    const boundaryPattern = pattern$1(boundingPath, thinBlackPallette);
+    const boundarySubject = subject(boundaryPattern, [1, 0, 0, 1, 0, 0], true, "boundaries");
+    const hexSubject = subject(hexPattern, [1, 0, 0, 1, 100, 100], true, "lone hexagon");
+    const baseLayer = frame([boundarySubject, hexSubject], [1, 0, 0, 1, 0, 0], true);
+    const geomancer = camera([baseLayer], [1, 0, 0, 1, 0, 0], 800, 800);
+
+    let extents = {left: 0, right: 800, top: 0, bottom: 800};
+    let maxZoom = 5;
+    const handlers = {
+    	mousedown: (mouse, {camera, id}) => {
+        view.startPanning(mouse.clientX, mouse.clientY, id);
+      },
+    	mouseup: (mouse, {camera, id}) => { view.stopPanning(id); },
+    	mouseout: (mouse, {camera, id}) => { view.stopPanning(id); },
+    	mousemove: (mouse, {camera, id}) => {
+        let state = get_store_value(camera);
+        console.log(state.itemsAt(mouse.clientX, mouse.clientY));
+
+        let target = view.panning(mouse.clientX, mouse.clientY, state.transform, id);
+        view.enforceBoundaries(state.width, state.height, target, extents);
+        camera.setTransform(target);
+      },
+    	wheel: (mouse, {camera}) => {
+        let state = get_store_value(camera);
+        let target = view.mouseZoom(mouse, state.transform);
+        view.enforceBoundaries(state.width, state.height, target, extents, maxZoom);
+
+        camera.setTransform(target);
+      },
+    };
+
+    var example = {
+      camera: geomancer,
+      handlers
+    };
+
+    function order (layer, subjects = []) {
+      layer.subjects.forEach(subject => {
+    		subjects.push(subject.id);
+      });
+
+      layer.layers.forEach(subLayer => {
+        order(subLayer, subjects);
+      });
+
+      return subjects
+    }
+
+
+    function resolve (transform, layer, subjects = {}) {
+      const layerTransform = measure.applyTransform(transform, layer.transform);
+
+      layer.subjects.forEach(subject => {
+    		let subjectTransform = measure.applyTransform(layerTransform, subject.transform);
+    		subjects[subject.id] = {
+          ...subject,
+          transform: subjectTransform
+        };
+      });
+
+      layer.layers.forEach(subLayer => {
+        resolve(reference, layerTransform, subLayer);
+      });
+
+      return subjects
+    }
+
+
+    var subjects = {
+      order,
+      resolve
+    };
 
     function makeHull(context, course, id) {
       const subject = course.subjects[id];
@@ -858,518 +1399,50 @@ var app = (function () {
       paint
     };
 
-    const defaults = {
-      fillStyle: null,
-      strokeStyle: null,
-      lineWidth: 1,
-      lineCap: 'butt',
-      lineJoin: 'miter',
-      miterLimit: 10.0,
-      lineDash: [],
-      lineDashOffset: 0,
-      shadowOffsetX: 0,
-      shadowOffsetY: 0,
-      shadowBlur: 0,
-      shadowColor: 'transparent',
-      fill: 'nonzero',
-      font: 'sans-serif',
-      textAlign: 'start',
-      textBaseline: 'alphabetic',
-      direction: 'inherit'
-    };
-
-    function palletteToPainter(options) {
-      console.log(options);
-      let pallette = {...defaults, ...options};
-      function painter(context, path) {
-        console.log(context, path, pallette);
-        context.lineWidth = pallette.lineWidth;
-        context.lineCap = pallette.lineCap;
-        context.lineJoin = pallette.lineJoin;
-        context.miterLimit = pallette.miterLimit;
-        context.setLineDash(pallette.lineDash);
-        context.lineDashOffset = pallette.lineDashOffset;
-        context.font = pallette.font;
-        context.textAlign = pallette.textAlign;
-        context.textBaseline = pallette.textBaseline;
-        context.direction = pallette.direction;
-        context.shadowOffsetX = pallette.shadowOffsetX;
-        context.shadowOffsetY = pallette.shadowOffsetY;
-        context.shadowBlur = pallette.shadowBlur;
-        context.shadowColor = pallette.shadowColor;
-        context.fillStyle = pallette.fillStyle;
-        context.strokeStyle = pallette.strokeStyle;
-
-        if (path.text) {
-          if (pallette.fillStyle) context.fillText(path.text, path.x, path.y, path.maxWidth);
-          if (pallette.strokeStyle) context.strokeText(path.text, path.x, path.y, path.maxWidth);
-        } else {
-          if (pallette.fillStyle) context.fill(path);
-          if (pallette.strokeStyle) context.stroke(path);
-        }
-      }
-
-      return painter
-    }
-
-    function linearGradient(context, start, end, stops) {
-      let grad = context.createLinearGradient(start.x, start.y, end.x, end.y);
-      stops.forEach(({loc, color}) => grad.addColorStop(loc, color));
-
-      return grad
-    }
-
-    function radialGradient(context, start, end, stops) {
-      let grad = context.createRadialGradient(start.x, start.y, start.radius, end.x, end.y, end.radius);
-      stops.forEach(({loc, color}) => grad.addColorStop(loc, color));
-
-      return grad
-    }
-
-    function pattern(context, url, type) {
-      let img = new Image();
-      img.src(url);
-      let ptrn = context.createPattern(img, type);
-
-      return ptrn
-    }
-
-    function pallettesToPainters (pallettes) {
-      let painters = {};
-      for (let id in pallettes) {
-        let painter = palletteToPainter(pallettes[id]);
-        painters[id] = painter;
-      }
-      return painters
-    }
-
-    var style = {
-      linearGradient,
-      radialGradient,
-      pattern,
-      palletteToPainter,
-      pallettesToPainters
-    };
-
-    var style$1 = /*#__PURE__*/Object.freeze({
-        __proto__: null,
-        'default': style
-    });
-
-    const subscriber_queue = [];
-    /**
-     * Creates a `Readable` store that allows reading by subscription.
-     * @param value initial value
-     * @param {StartStopNotifier}start start and stop notifications for subscriptions
-     */
-    function readable(value, start) {
-        return {
-            subscribe: writable(value, start).subscribe,
-        };
-    }
-    /**
-     * Create a `Writable` store that allows both updating and reading by subscription.
-     * @param {*=}value initial value
-     * @param {StartStopNotifier=}start start and stop notifications for subscriptions
-     */
-    function writable(value, start = noop) {
-        let stop;
-        const subscribers = [];
-        function set(new_value) {
-            if (safe_not_equal(value, new_value)) {
-                value = new_value;
-                if (stop) { // store is ready
-                    const run_queue = !subscriber_queue.length;
-                    for (let i = 0; i < subscribers.length; i += 1) {
-                        const s = subscribers[i];
-                        s[1]();
-                        subscriber_queue.push(s, value);
-                    }
-                    if (run_queue) {
-                        for (let i = 0; i < subscriber_queue.length; i += 2) {
-                            subscriber_queue[i][0](subscriber_queue[i + 1]);
-                        }
-                        subscriber_queue.length = 0;
-                    }
-                }
-            }
-        }
-        function update(fn) {
-            set(fn(value));
-        }
-        function subscribe(run, invalidate = noop) {
-            const subscriber = [run, invalidate];
-            subscribers.push(subscriber);
-            if (subscribers.length === 1) {
-                stop = start(set) || noop;
-            }
-            run(value);
-            return () => {
-                const index = subscribers.indexOf(subscriber);
-                if (index !== -1) {
-                    subscribers.splice(index, 1);
-                }
-                if (subscribers.length === 0) {
-                    stop();
-                    stop = null;
-                }
-            };
-        }
-        return { set, update, subscribe };
-    }
-    function derived(stores, fn, initial_value) {
-        const single = !Array.isArray(stores);
-        const stores_array = single
-            ? [stores]
-            : stores;
-        const auto = fn.length < 2;
-        return readable(initial_value, (set) => {
-            let inited = false;
-            const values = [];
-            let pending = 0;
-            let cleanup = noop;
-            const sync = () => {
-                if (pending) {
-                    return;
-                }
-                cleanup();
-                const result = fn(single ? values[0] : values, set);
-                if (auto) {
-                    set(result);
-                }
-                else {
-                    cleanup = is_function(result) ? result : noop;
-                }
-            };
-            const unsubscribers = stores_array.map((store, i) => subscribe(store, (value) => {
-                values[i] = value;
-                pending &= ~(1 << i);
-                if (inited) {
-                    sync();
-                }
-            }, () => {
-                pending |= (1 << i);
-            }));
-            inited = true;
-            sync();
-            return function stop() {
-                run_all(unsubscribers);
-                cleanup();
-            };
-        });
-    }
-
-    // Unique ID creation requires a high quality random # generator. In the browser we therefore
-    // require the crypto API and do not support built-in fallback to lower quality random number
-    // generators (like Math.random()).
-    // getRandomValues needs to be invoked in a context where "this" is a Crypto implementation. Also,
-    // find the complete implementation of crypto (msCrypto) on IE11.
-    var getRandomValues = typeof crypto !== 'undefined' && crypto.getRandomValues && crypto.getRandomValues.bind(crypto) || typeof msCrypto !== 'undefined' && typeof msCrypto.getRandomValues === 'function' && msCrypto.getRandomValues.bind(msCrypto);
-    var rnds8 = new Uint8Array(16);
-    function rng() {
-      if (!getRandomValues) {
-        throw new Error('crypto.getRandomValues() not supported. See https://github.com/uuidjs/uuid#getrandomvalues-not-supported');
-      }
-
-      return getRandomValues(rnds8);
-    }
-
-    /**
-     * Convert array of 16 byte values to UUID string format of the form:
-     * XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
-     */
-    var byteToHex = [];
-
-    for (var i = 0; i < 256; ++i) {
-      byteToHex.push((i + 0x100).toString(16).substr(1));
-    }
-
-    function bytesToUuid(buf, offset_) {
-      var offset = offset_ || 0; // Note: Be careful editing this code!  It's been tuned for performance
-      // and works in ways you may not expect. See https://github.com/uuidjs/uuid/pull/434
-
-      return (byteToHex[buf[offset + 0]] + byteToHex[buf[offset + 1]] + byteToHex[buf[offset + 2]] + byteToHex[buf[offset + 3]] + '-' + byteToHex[buf[offset + 4]] + byteToHex[buf[offset + 5]] + '-' + byteToHex[buf[offset + 6]] + byteToHex[buf[offset + 7]] + '-' + byteToHex[buf[offset + 8]] + byteToHex[buf[offset + 9]] + '-' + byteToHex[buf[offset + 10]] + byteToHex[buf[offset + 11]] + byteToHex[buf[offset + 12]] + byteToHex[buf[offset + 13]] + byteToHex[buf[offset + 14]] + byteToHex[buf[offset + 15]]).toLowerCase();
-    }
-
-    function v4(options, buf, offset) {
-      options = options || {};
-      var rnds = options.random || (options.rng || rng)(); // Per 4.4, set bits for version and `clock_seq_hi_and_reserved`
-
-      rnds[6] = rnds[6] & 0x0f | 0x40;
-      rnds[8] = rnds[8] & 0x3f | 0x80; // Copy bytes to buffer, if provided
-
-      if (buf) {
-        offset = offset || 0;
-
-        for (var i = 0; i < 16; ++i) {
-          buf[offset + i] = rnds[i];
-        }
-
-        return buf;
-      }
-
-      return bytesToUuid(rnds);
-    }
-
-    function path(instructions) {
-      const pathStore = writable(instructions);
-      let shapeStore = derived(pathStore, $path =>({
-        shape: measure.pathToCanvas($path),
-        box: measure.pathToBox($path)
-      }));
-
-      return {
-        set: newInstructions => pathStore.set(newInstructions),
-        subscribe: callback => shapeStore.subscribe(callback)
-      }
-    }
-
-    function pallette(styling) {
-      console.log(styling);
-      const palletteStore = writable(styling);
-      let painterStore = derived(palletteStore, $pallette => style.palletteToPainter($pallette));
-
-      return {
-        set: newStyle => palletteStore.set(newStyle),
-        subscribe: callback => painterStore.subscribe(callback)
-      }
-    }
-
-    function resetStore(store, subscribers) {
-      subscribers.forEach(sub => {
-        sub.unsubscribe = store.subscribe(sub.callback);
-      });
-      return store
-    }
-
-    function subscription(store, subscribers, callback) {
-      const index = v4();
-      const unsubscribe = store.subscribe(callback);
-      subscribers[index] = {callback, unsubscribe};
-
-      return () => {
-        subscribers[index].unsubscribe();
-        delete subscribers[index];
-      }
-    }
-
-    function pattern$1(path, pallette) {
-      function reaction([path, pallette]) {
-        return {
-          draw: context => pallette(context, path.shape),
-          box: path.box
-        }
-      }
-
-      let store = derived([path, pallette], reaction);
-      const subscribers = {};
-
-      return {
-        set: (newPath, newPallette) => {
-          path = newPath;
-          pallette = newPallette;
-          store = resetStore(derived([path, pallette], reaction), subscribers);
-        },
-        setPath: (newPath) => {
-          path = newPath;
-          store = resetStore(derived([path, pallette], reaction), subscribers);
-        },
-        setPallette: (newPallette) => {
-          pallette = newPallette;
-          store = resetStore(derived([path, pallette], reaction), subscribers);
-        },
-        subscribe: (callback) => {
-          return subscription(store, subscribers, callback)
-        }
-      }
-    }
-
-    function subject(pattern, transform, visible) {
-      const transformStore = writable(transform);
-      const visibleStore = writable(visible);
-
-      function reaction([pattern, transform, visible]) {
-        return {
-          draw: (context, viewport) => {
-            context.save();
-            context.transform(...transform);
-            const t = context.getTransform();
-            const subjectBox = measure.transformBox(pattern.box, [t.a, t.b, t.c, t.d, t.e, t.f]);
-            if (visible && tracer$1.boxesIntersect(viewport, subjectBox)) {
-              pattern.draw(context);
-              context.restore();
-            }
-          }
-        }
-      }
-
-      let store = derived([pattern, transformStore, visibleStore], reaction);
-      const subscribers = {};
-
-      return {
-        set: (newPattern, newTransform, newVisible) => {
-          subscribers.forEach(sub => {sub.unsubscribe();});
-          const newStore = derived([newPattern, transformStore, visibleStore], reaction);
-          transformStore.set(newTransform);
-          visibleStore.set(newVisible);
-          store = resetStore(newStore, subscribers);
-        },
-        setTransform: (newTransform) => {
-          transformStore.set(newTransform);
-        },
-        setVisible: (newVisible) => {
-          visibleStore.set(newVisible);
-        },
-        setPattern: (newPattern) => {
-          subscribers.forEach(sub => {sub.unsubscribe();});
-          store = resetStore(derived([newPattern, transformStore, visibleStore], reaction));
-        },
-        subscribe: (callback) => {
-          return subscription(store, subscribers, callback)
-        }
-      }
-    }
-
-    function layer(subjects, transform, visible) {
-      const transformStore = writable(transform);
-      const visibleStore = writable(visible);
-
-      function reaction([transform, visible, ...subjects]) {
-        console.log(transform);
-        return {
-          draw: (context, viewport) => {
-            if (visible) {
-              context.save();
-              context.transform(...transform);
-              subjects.forEach(sub => console.log("layer", sub));
-              subjects.forEach(subject => subject.draw(context, viewport));
-              context.restore();
-            }
-          }
-        }
-      }
-
-      let store = derived([transformStore, visibleStore, ...subjects], reaction);
-      const subscribers = {};
-
-      return {
-        set: (newSubjects, newTransform, newVisible) => {
-          subscribers.forEach(sub => {sub.unsubscribe();});
-          const newStore = derived([transformStore, visibleStore, ...newSubjects], reaction);
-          transformStore.set(newTransform);
-          visibleStore.set(newVisible);
-          store = resetStore(newStore, subscribers);
-        },
-        setTransform: (newTransform) => {
-          transformStore.set(newTransform);
-        },
-        setVisible: (newVisible) => {
-          visibleStore.set(newVisible);
-        },
-        setSubjects: (newSubjects) => {
-          subscribers.forEach(sub => {sub.unsubscribe();});
-          const newStore = derived([transformStore, visibleStore, ...newSubjects], reaction);
-          store = resetStore(newStore, subscribers);
-        },
-        subscribe: (callback) => {
-          return subscription(store, subscribers, callback)
-        }
-      }
-    }
-
-    function camera(subjects, transform, width, height) {
-      const transformStore = writable(transform);
-      const widthStore = writable(width);
-      const heightStore = writable(height);
-
-      function reaction([transform, width, height, ...subjects]) {
-        const viewport = measure.transformBox({min: {x: 0, y: 0}, max: {x: width, y: height}}, transform);
-        return {
-          draw: (context) => {
-            console.time("full draw");
-            context.setTransform(1, 0, 0, 1, 0, 0);
-            context.save();
-            subjects.forEach(sub => console.log(sub));
-            subjects.forEach(subject => subject.draw(context, viewport));
-            context.restore();
-            context.transform(...transform);
-            console.timeEnd("full draw");
-          }
-        }
-      }
-
-      let store = derived([transformStore, widthStore, heightStore, ...subjects], reaction);
-      const subscribers = {};
-
-      return {
-        set: (newLayers, newTransform, newWidth, newHeight) => {
-          subscribers.forEach(sub => {sub.unsubscribe();});
-          const newStore = derived([transformStore, widthStore, heightStore, ...newSubjects], reaction);
-          widthStore.set(newWidth);
-          heightStore.set(newHeight);
-          transformStore.set(newTransform);
-          store = resetStore(newStore, subscribers);
-        },
-        setTransform: (newTransform) => {
-          transformStore.set(newTransform);
-        },
-        setWidth: (newWidth) => {
-          widthStore.set(newWidth);
-        },
-        setHeight: (newHeight) => {
-          heightStore.set(newHeight);
-        },
-        setSubjects: (newSubjects) => {
-          subscribers.forEach(sub => {sub.unsubscribe();});
-          const newStore = derived([transformStore, widthStore, heightStore, ...newSubjects], reaction);
-          store = resetStore(newStore, subscribers);
-        },
-        subscribe: (callback) => {
-          console.log("camera subscribed");
-          return subscription(store, subscribers, callback)
-        },
-      }
-    }
-
     /* src/Geomancer.svelte generated by Svelte v3.20.1 */
-
-    const { console: console_1 } = globals;
     const file = "src/Geomancer.svelte";
 
     function create_fragment(ctx) {
     	let canvas_1;
     	let canvas_1_width_value;
     	let canvas_1_height_value;
+    	let eventHandlers_action;
+    	let dispose;
 
     	const block = {
     		c: function create() {
     			canvas_1 = element("canvas");
     			this.c = noop;
-    			attr_dev(canvas_1, "width", canvas_1_width_value = "" + (/*width*/ ctx[0] + "px"));
-    			attr_dev(canvas_1, "height", canvas_1_height_value = "" + (/*height*/ ctx[1] + "px"));
-    			add_location(canvas_1, file, 115, 0, 3007);
+    			attr_dev(canvas_1, "width", canvas_1_width_value = "" + (/*width*/ ctx[1] + "px"));
+    			attr_dev(canvas_1, "height", canvas_1_height_value = "" + (/*height*/ ctx[2] + "px"));
+    			add_location(canvas_1, file, 79, 0, 1762);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
-    		m: function mount(target, anchor) {
+    		m: function mount(target, anchor, remount) {
     			insert_dev(target, canvas_1, anchor);
-    			/*canvas_1_binding*/ ctx[15](canvas_1);
+    			/*canvas_1_binding*/ ctx[9](canvas_1);
+    			if (remount) dispose();
+    			dispose = action_destroyer(eventHandlers_action = /*eventHandlers*/ ctx[4].call(null, canvas_1, /*handlers*/ ctx[0]));
     		},
     		p: function update(ctx, [dirty]) {
-    			if (dirty & /*width*/ 1 && canvas_1_width_value !== (canvas_1_width_value = "" + (/*width*/ ctx[0] + "px"))) {
+    			if (dirty & /*width*/ 2 && canvas_1_width_value !== (canvas_1_width_value = "" + (/*width*/ ctx[1] + "px"))) {
     				attr_dev(canvas_1, "width", canvas_1_width_value);
     			}
 
-    			if (dirty & /*height*/ 2 && canvas_1_height_value !== (canvas_1_height_value = "" + (/*height*/ ctx[1] + "px"))) {
+    			if (dirty & /*height*/ 4 && canvas_1_height_value !== (canvas_1_height_value = "" + (/*height*/ ctx[2] + "px"))) {
     				attr_dev(canvas_1, "height", canvas_1_height_value);
     			}
+
+    			if (eventHandlers_action && is_function(eventHandlers_action.update) && dirty & /*handlers*/ 1) eventHandlers_action.update.call(null, /*handlers*/ ctx[0]);
     		},
     		i: noop,
     		o: noop,
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(canvas_1);
-    			/*canvas_1_binding*/ ctx[15](null);
+    			/*canvas_1_binding*/ ctx[9](null);
+    			dispose();
     		}
     	};
 
@@ -1385,102 +1458,66 @@ var app = (function () {
     }
 
     function instance($$self, $$props, $$invalidate) {
-    	let { width = 800 } = $$props;
-    	let { height = 800 } = $$props;
+    	let { id = v4() } = $$props;
+    	let { camera = example.camera } = $$props;
+    	let { handlers = example.handlers } = $$props;
+    	let width = 800;
+    	let height = 800;
 
-    	const hexPath = path([
-    		["moveTo", 2.5, 43.3],
-    		["lineTo", 26.25, 84.77],
-    		["lineTo", 73.75, 84.77],
-    		["lineTo", 97.5, 43.3],
-    		["lineTo", 73.75, 2.165],
-    		["lineTo", 26.25, 2.165],
-    		["closePath"]
-    	]);
-
-    	const boundingPath = path([["rect", 10, 10, 780, 780]]);
-
-    	const blackPallette = pallette({
-    		fillStyle: "black",
-    		lineWidth: 3,
-    		lineJoin: "round"
+    	camera.subscribe(camera => {
+    		$$invalidate(1, width = camera.width);
+    		$$invalidate(2, height = camera.height);
     	});
 
-    	const thinBlackPallette = pallette({
-    		lineWidth: 5,
-    		strokeStyle: "black",
-    		lineJoin: "round"
-    	});
-
-    	const hexPattern = pattern$1(hexPath, blackPallette);
-    	const boundaryPattern = pattern$1(boundingPath, thinBlackPallette);
-    	const boundarySubject = subject(boundaryPattern, [1, 0, 0, 1, 0, 0], true);
-    	const hexSubject = subject(hexPattern, [1, 0, 0, 1, 100, 100], true);
-    	const baseLayer = layer([boundarySubject, hexSubject], [1, 0, 0, 1, 0, 0], true);
-    	const geomancer = camera([baseLayer], [1, 0, 0, 1, 0, 0], width, height);
     	let canvas;
     	const context = writable(null);
 
-    	const paintStore = derived([context, geomancer], ([context, geomancer]) => {
+    	const paintStore = derived([context, camera], ([context, camera]) => {
     		return () => {
-    			console.log("painting?");
-
     			if (context) {
-    				console.log("painting!");
     				context.clearRect(0, 0, width, height);
-    				geomancer.draw(context);
+    				camera.draw(context);
     			}
     		};
     	});
 
     	paintStore.subscribe(draw => draw());
 
-    	// export let handlers = {
-    	// 	mousedown: view.startPanning,
-    	// 	mouseup: view.stopPanning,
-    	// 	mouseout: view.stopPanning,
-    	// 	mousemove: view.panning,
-    	// 	wheel: view.zooming,
-    	// }
-    	// function eventHandlers (node, events) {
-    	// 	let context = {
-    	// 		element: node,
-    	// 		extents: extentsStore,
-    	// 		width: widthStore,
-    	// 		height: heightStore,
-    	// 		transform: transformStore,
-    	// 		paths: pathsStore,
-    	// 		pallettes: pallettesStore,
-    	// 		layers: layersStore,
-    	// 	}
-    	// 	let handlers = []
-    	// 	for (const ev in events) {
-    	// 		handlers.push([ev, (event) => events[ev](event, context)])
-    	// 	}
-    	// 	handlers.forEach(([ev, handler]) => node.addEventListener(ev, handler))
-    	// 	return {
-    	// 		update (newHandlers) {
-    	// 			handlers.forEach(([ev, handler]) => node.removeEventListener(ev, handler))
-    	// 			handlers = []
-    	// 			for (const ev in newHandlers) {
-    	// 				handlers.push([ev, (event) => events[ev](event, context)])
-    	// 			}
-    	// 			handlers.forEach(([ev, handler]) => node.addEventListener(ev, handler))
-    	// 		},
-    	// 		destroy () {
-    	// 			handlers.forEach(([ev, handler]) => node.removeEventListener(ev, handler))
-    	// 		}
-    	// 	}
-    	// }
+    	function eventHandlers(node, events) {
+    		let handlers = [];
+    		let localContext = { camera, id };
+
+    		for (const ev in events) {
+    			handlers.push([ev, event => events[ev](event, localContext)]);
+    		}
+
+    		handlers.forEach(([ev, handler]) => node.addEventListener(ev, handler));
+
+    		return {
+    			update(newHandlers) {
+    				handlers.forEach(([ev, handler]) => node.removeEventListener(ev, handler));
+    				handlers = [];
+
+    				for (const ev in newHandlers) {
+    					handlers.push([ev, event => events[ev](event, localContext)]);
+    				}
+
+    				handlers.forEach(([ev, handler]) => node.addEventListener(ev, handler));
+    			},
+    			destroy() {
+    				handlers.forEach(([ev, handler]) => node.removeEventListener(ev, handler));
+    			}
+    		};
+    	}
+
     	onMount(() => {
-    		console.log(get_store_value(geomancer));
     		context.set(canvas.getContext("2d"));
     	});
 
-    	const writable_props = ["width", "height"];
+    	const writable_props = ["id", "camera", "handlers"];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console_1.warn(`<geomancer-scene> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<geomancer-scene> was created with unknown prop '${key}'`);
     	});
 
     	let { $$slots = {}, $$scope } = $$props;
@@ -1488,13 +1525,14 @@ var app = (function () {
 
     	function canvas_1_binding($$value) {
     		binding_callbacks[$$value ? "unshift" : "push"](() => {
-    			$$invalidate(2, canvas = $$value);
+    			$$invalidate(3, canvas = $$value);
     		});
     	}
 
     	$$self.$set = $$props => {
-    		if ("width" in $$props) $$invalidate(0, width = $$props.width);
-    		if ("height" in $$props) $$invalidate(1, height = $$props.height);
+    		if ("id" in $$props) $$invalidate(5, id = $$props.id);
+    		if ("camera" in $$props) $$invalidate(6, camera = $$props.camera);
+    		if ("handlers" in $$props) $$invalidate(0, handlers = $$props.handlers);
     	};
 
     	$$self.$capture_state = () => ({
@@ -1502,12 +1540,6 @@ var app = (function () {
     		derived,
     		get: get_store_value,
     		onMount,
-    		path,
-    		pallette,
-    		pattern: pattern$1,
-    		subject,
-    		layer,
-    		camera,
     		style,
     		scene,
     		measure,
@@ -1516,27 +1548,26 @@ var app = (function () {
     		handles,
     		view,
     		subjects,
+    		example,
+    		uuidv4: v4,
+    		id,
+    		camera,
+    		handlers,
     		width,
     		height,
-    		hexPath,
-    		boundingPath,
-    		blackPallette,
-    		thinBlackPallette,
-    		hexPattern,
-    		boundaryPattern,
-    		boundarySubject,
-    		hexSubject,
-    		baseLayer,
-    		geomancer,
     		canvas,
     		context,
-    		paintStore
+    		paintStore,
+    		eventHandlers
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ("width" in $$props) $$invalidate(0, width = $$props.width);
-    		if ("height" in $$props) $$invalidate(1, height = $$props.height);
-    		if ("canvas" in $$props) $$invalidate(2, canvas = $$props.canvas);
+    		if ("id" in $$props) $$invalidate(5, id = $$props.id);
+    		if ("camera" in $$props) $$invalidate(6, camera = $$props.camera);
+    		if ("handlers" in $$props) $$invalidate(0, handlers = $$props.handlers);
+    		if ("width" in $$props) $$invalidate(1, width = $$props.width);
+    		if ("height" in $$props) $$invalidate(2, height = $$props.height);
+    		if ("canvas" in $$props) $$invalidate(3, canvas = $$props.canvas);
     	};
 
     	if ($$props && "$$inject" in $$props) {
@@ -1544,19 +1575,13 @@ var app = (function () {
     	}
 
     	return [
+    		handlers,
     		width,
     		height,
     		canvas,
-    		hexPath,
-    		boundingPath,
-    		blackPallette,
-    		thinBlackPallette,
-    		hexPattern,
-    		boundaryPattern,
-    		boundarySubject,
-    		hexSubject,
-    		baseLayer,
-    		geomancer,
+    		eventHandlers,
+    		id,
+    		camera,
     		context,
     		paintStore,
     		canvas_1_binding
@@ -1566,7 +1591,7 @@ var app = (function () {
     class Geomancer extends SvelteElement {
     	constructor(options) {
     		super();
-    		init(this, { target: this.shadowRoot }, instance, create_fragment, safe_not_equal, { width: 0, height: 1 });
+    		init(this, { target: this.shadowRoot }, instance, create_fragment, safe_not_equal, { id: 5, camera: 6, handlers: 0 });
 
     		if (options) {
     			if (options.target) {
@@ -1581,24 +1606,33 @@ var app = (function () {
     	}
 
     	static get observedAttributes() {
-    		return ["width", "height"];
+    		return ["id", "camera", "handlers"];
     	}
 
-    	get width() {
-    		return this.$$.ctx[0];
+    	get id() {
+    		return this.$$.ctx[5];
     	}
 
-    	set width(width) {
-    		this.$set({ width });
+    	set id(id) {
+    		this.$set({ id });
     		flush();
     	}
 
-    	get height() {
-    		return this.$$.ctx[1];
+    	get camera() {
+    		return this.$$.ctx[6];
     	}
 
-    	set height(height) {
-    		this.$set({ height });
+    	set camera(camera) {
+    		this.$set({ camera });
+    		flush();
+    	}
+
+    	get handlers() {
+    		return this.$$.ctx[0];
+    	}
+
+    	set handlers(handlers) {
+    		this.$set({ handlers });
     		flush();
     	}
     }

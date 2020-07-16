@@ -138,7 +138,6 @@ function pathToCanvas(path) {
 
   let p2d = new Path2D()
   path.forEach(subpath => {
-    console.log(subpath)
     p2d[subpath[0]](...subpath.slice(1))
   })
 

@@ -148,6 +148,16 @@ function boxBox(boxes) {
   }
 }
 
+function generateHitChecker(context, path, transform) {
+  return (x, y) => {
+    context.save()
+    context.setTransform(...transform)
+    const inPath = context.isPointInPath(path, x, y)
+    context.restore()
+    return inPath
+  }
+}
+
 export default {
   tracer,
   insert,
@@ -155,4 +165,5 @@ export default {
   intersectPoint,
   intersectBox,
   boxesIntersect,
+  generateHitChecker,
 }

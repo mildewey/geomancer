@@ -20,10 +20,8 @@ const defaults = {
 }
 
 function palletteToPainter(options) {
-  console.log(options)
   let pallette = {...defaults, ...options}
   function painter(context, path) {
-    console.log(context, path, pallette)
     context.lineWidth = pallette.lineWidth
     context.lineCap = pallette.lineCap
     context.lineJoin = pallette.lineJoin

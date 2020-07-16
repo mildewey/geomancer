@@ -1,11 +1,22 @@
 import events from './events'
 
+
 const lastX = {}
 const lastY = {}
 const isPanning = {}
 
-function enforceBoundaries (width, height, extents, transform) {
+function enforceBoundaries (width, height, transform, extents, maxZoom=null) {
   let zoom = transform[0]
+  let minZoom = Math.max(width/(extents.right-extents.left), height/(extents.bottom-extents.top))
+
+  if (zoom < minZoom) {
+    zoom = minZoom
+  } else if (maxZoom && zoom > maxZoom) {
+    zoom = maxZoom
+  }
+  transform[0] = zoom
+  transform[3] = zoom
+
   let x = transform[4]
   let y = transform[5]
   let maxX = -extents.left*zoom
@@ -29,49 +40,34 @@ function stableZoom (x, y, zoom, transform) {
   return target
 }
 
-function startPanning (mouse, context) {
-  lastX[context.element.id] = mouse.clientX
-  lastY[context.element.id] = mouse.clientY
-  isPanning[context.element.id] = true
+function startPanning (x, y, id) {
+  lastX[id] = x
+  lastY[id] = y
+  isPanning[id] = true
 }
 
-function panning (mouse, context) {
-  if (!isPanning[context.element.id]) {
-    return;
+function panning (x, y, transform, id) {
+  if (!isPanning[id]) {
+    return transform;
   }
-  let transform = context.transform
-  let target = [...$transform]
-  target[4] = transform[4] + mouse.clientX - lastX[context.element.id]
-  target[5] = transform[5] + mouse.clientY - lastY[context.element.id]
-  lastX[context.element.id] = mouse.clientX
-  lastY[context.element.id] = mouse.clientY
-  enforceBoundaries(width, height, extents, target)
-  context.transform.set(target)
+  let target = [...transform]
+  target[4] = transform[4] + x - lastX[id]
+  target[5] = transform[5] + y - lastY[id]
+  lastX[id] = x
+  lastY[id] = y
+  return target
 }
 
-function stopPanning (mouse, node) {
-  isPanning[node.id] = false
+function stopPanning (id) {
+  isPanning[id] = false
 }
 
-function zooming (mouse, node, width, height, extents, transform) {
-  console.log(width, height, extents, transform)
-  let delta = -Math.sign(mouse.deltaY)
-  let zoom = transform[0] * (1.2 ** delta)
-  let minZoom = Math.max(
-    width/(extents.right - extents.left),
-    height/(extents.bottom - extents.top),
-    0.5
-  )
-  if (zoom > 5) zoom = 5
-  if (zoom < minZoom) zoom = minZoom
-
-  let target = stableZoom(mouse.offsetX, mouse.offsetY, zoom, transform)
-  enforceBoundaries(width, height, extents, target)
-
+function mouseZoom (mouse, transform, speed=1.2) {
+  let zoom = transform[0] * (speed ** -Math.sign(mouse.deltaY))
   mouse.preventDefault()
   mouse.stopPropagation()
-  console.log(target)
-  node.dispatchEvent(new CustomEvent("panZoomRotate", {transform: target}))
+
+  return stableZoom(mouse.offsetX, mouse.offsetY, zoom, transform)
 }
 
 export default {
@@ -80,5 +76,5 @@ export default {
   startPanning,
   panning,
   stopPanning,
-  zooming,
+  mouseZoom
 }

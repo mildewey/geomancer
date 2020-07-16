@@ -7,9 +7,10 @@ import { v4 as uuidv4 } from 'uuid';
 
 function path(instructions) {
   const pathStore = writable(instructions)
-  let shapeStore = derived(pathStore, $path =>({
-    shape: measure.pathToCanvas($path),
-    box: measure.pathToBox($path)
+  let shapeStore = derived(pathStore, instructions =>({
+    shape: measure.pathToCanvas(instructions),
+    box: measure.pathToBox(instructions),
+    instructions: instructions
   }))
 
   return {
@@ -19,9 +20,11 @@ function path(instructions) {
 }
 
 function pallette(styling) {
-  console.log(styling)
   const palletteStore = writable(styling)
-  let painterStore = derived(palletteStore, $pallette => style.palletteToPainter($pallette))
+  let painterStore = derived(palletteStore, styling => ({
+    draw: style.palletteToPainter(styling),
+    styling
+  }))
 
   return {
     set: newStyle => palletteStore.set(newStyle),
@@ -50,8 +53,9 @@ function subscription(store, subscribers, callback) {
 function pattern(path, pallette) {
   function reaction([path, pallette]) {
     return {
-      draw: context => pallette(context, path.shape),
-      box: path.box
+      draw: context => pallette.draw(context, path.shape),
+      path,
+      pallette
     }
   }
 
@@ -78,22 +82,29 @@ function pattern(path, pallette) {
   }
 }
 
-function subject(pattern, transform, visible) {
+function subject(pattern, transform, visible, trace=null) {
   const transformStore = writable(transform)
   const visibleStore = writable(visible)
 
   function reaction([pattern, transform, visible]) {
     return {
-      draw: (context, viewport) => {
+      draw: (context, viewport, hull) => {
         context.save()
         context.transform(...transform)
         const t = context.getTransform()
-        const subjectBox = measure.transformBox(pattern.box, [t.a, t.b, t.c, t.d, t.e, t.f])
+        const currentTransform = [t.a, t.b, t.c, t.d, t.e, t.f]
+        const subjectBox = measure.transformBox(pattern.path.box, currentTransform)
+        if (trace) {
+          tracer.insert(hull, {...subjectBox, value: trace, check: tracer.generateHitChecker(context, pattern.path.shape, currentTransform)})
+        }
         if (visible && tracer.boxesIntersect(viewport, subjectBox)) {
           pattern.draw(context)
           context.restore()
         }
-      }
+      },
+      pattern,
+      transform,
+      visible
     }
   }
 
@@ -124,22 +135,23 @@ function subject(pattern, transform, visible) {
   }
 }
 
-function layer(subjects, transform, visible) {
+function frame(subjects, transform, visible) {
   const transformStore = writable(transform)
   const visibleStore = writable(visible)
 
   function reaction([transform, visible, ...subjects]) {
-    console.log(transform)
     return {
-      draw: (context, viewport) => {
+      draw: (context, viewport, hull) => {
         if (visible) {
           context.save()
           context.transform(...transform)
-          subjects.forEach(sub => console.log("layer", sub))
-          subjects.forEach(subject => subject.draw(context, viewport))
+          subjects.forEach(subject => subject.draw(context, viewport, hull))
           context.restore()
         }
-      }
+      },
+      transform,
+      visible,
+      subjects
     }
   }
 
@@ -175,19 +187,25 @@ function camera(subjects, transform, width, height) {
   const transformStore = writable(transform)
   const widthStore = writable(width)
   const heightStore = writable(height)
+  let hull = tracer.tracer()
 
   function reaction([transform, width, height, ...subjects]) {
     const viewport = measure.transformBox({min: {x: 0, y: 0}, max: {x: width, y: height}}, transform)
     return {
       draw: (context) => {
-        console.time("full draw")
-        context.setTransform(1, 0, 0, 1, 0, 0)
+        context.setTransform(...transform)
         context.save()
-        subjects.forEach(sub => console.log(sub))
-        subjects.forEach(subject => subject.draw(context, viewport))
+        hull = tracer.tracer()
+        subjects.forEach(subject => subject.draw(context, viewport, hull))
         context.restore()
-        context.transform(...transform)
-        console.timeEnd("full draw")
+        return hull
+      },
+      transform,
+      width,
+      height,
+      subjects,
+      itemsAt: (x, y) => {
+        return tracer.intersectPoint(hull, {x, y})
       }
     }
   }
@@ -219,7 +237,6 @@ function camera(subjects, transform, width, height) {
       store = resetStore(newStore, subscribers)
     },
     subscribe: (callback) => {
-      console.log("camera subscribed")
       return subscription(store, subscribers, callback)
     },
   }
@@ -230,6 +247,6 @@ export {
   pallette,
   pattern,
   subject,
-  layer,
+  frame,
   camera
 }

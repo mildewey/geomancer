@@ -1,16 +1,6 @@
 import measure from './measure'
 import tracer from './tracer'
 
-function generateHitChecker(context, path, transform) {
-  return (x, y) => {
-    context.save()
-    context.setTransform(...transform)
-    const inPath = context.isPointInPath(path, x, y)
-    context.restore()
-    return inPath
-  }
-}
-
 function makeHull(context, course, id) {
   const subject = course.subjects[id]
   if (subject.handle) {
