@@ -36,9 +36,6 @@ var app = (function () {
         subscribe(store, _ => value = _)();
         return value;
     }
-    function action_destroyer(action_result) {
-        return action_result && is_function(action_result.destroy) ? action_result.destroy : noop;
-    }
     function insert(target, node, anchor) {
         target.insertBefore(node, anchor || null);
     }
@@ -91,6 +88,9 @@ var app = (function () {
     function add_render_callback(fn) {
         render_callbacks.push(fn);
     }
+    function add_flush_callback(fn) {
+        flush_callbacks.push(fn);
+    }
     let flushing = false;
     const seen_callbacks = new Set();
     function flush() {
@@ -139,11 +139,39 @@ var app = (function () {
         }
     }
     const outroing = new Set();
+    let outros;
     function transition_in(block, local) {
         if (block && block.i) {
             outroing.delete(block);
             block.i(local);
         }
+    }
+    function transition_out(block, local, detach, callback) {
+        if (block && block.o) {
+            if (outroing.has(block))
+                return;
+            outroing.add(block);
+            outros.c.push(() => {
+                outroing.delete(block);
+                if (callback) {
+                    if (detach)
+                        block.d(1);
+                    callback();
+                }
+            });
+            block.o(local);
+        }
+    }
+
+    function bind(component, name, callback) {
+        const index = component.$$.props[name];
+        if (index !== undefined) {
+            component.$$.bound[index] = callback;
+            callback(component.$$.ctx[index]);
+        }
+    }
+    function create_component(block) {
+        block && block.c();
     }
     function mount_component(component, target, anchor) {
         const { fragment, on_mount, on_destroy, after_update } = component.$$;
@@ -303,160 +331,167 @@ var app = (function () {
         }
     }
 
-    // Unique ID creation requires a high quality random # generator. In the browser we therefore
-    // require the crypto API and do not support built-in fallback to lower quality random number
-    // generators (like Math.random()).
-    // getRandomValues needs to be invoked in a context where "this" is a Crypto implementation. Also,
-    // find the complete implementation of crypto (msCrypto) on IE11.
-    var getRandomValues = typeof crypto !== 'undefined' && crypto.getRandomValues && crypto.getRandomValues.bind(crypto) || typeof msCrypto !== 'undefined' && typeof msCrypto.getRandomValues === 'function' && msCrypto.getRandomValues.bind(msCrypto);
-    var rnds8 = new Uint8Array(16);
-    function rng() {
-      if (!getRandomValues) {
-        throw new Error('crypto.getRandomValues() not supported. See https://github.com/uuidjs/uuid#getrandomvalues-not-supported');
+    function sorter (a, b) {
+      if (a.index < b.index) return -1
+      if (a.index > b.index) return 1
+      return 0
+    }
+
+    function tracer (init = []) { // init is filled with objects that have a min point, a max point, and a value
+      const tracer = {
+        x: [],
+        y: [],
+        checks: {}
+      };
+
+      return concat(tracer, init)
+    }
+
+    function insert$1 (tracer, {min, max, value, check}) {
+      tracer.checks[value] = check;
+      tracer.x.push({index: Math.floor(min.x), value});
+      tracer.x.push({index: Math.floor(max.x), value});
+      tracer.x.sort(sorter);
+
+      tracer.y.push({index: Math.floor(min.y), value});
+      tracer.y.push({index: Math.floor(max.y), value});
+      tracer.y.sort(sorter);
+    }
+
+    function concat (tracer, boxes) {
+      boxes.forEach(box => tracer.checks[box.value]=box.check);
+
+      tracer.x = boxes.map(({min, value}) => {
+        return {index: Math.floor(min.x), value}
+      }).concat(boxes.map(({max, value}) => {
+        return {index: Math.floor(max.x), value}
+      }));
+
+      tracer.y = boxes.map(({min, value}) => {
+        return {index: Math.floor(min.y), value}
+      }).concat(boxes.map(({max, value}) => {
+        return {index: Math.floor(max.y), value}
+      }));
+
+      tracer.x.sort(sorter);
+      tracer.y.sort(sorter);
+
+      return tracer
+    }
+
+    function intersectPoint (tracer, point) {
+      let active = new Set();
+      let x = Math.floor(point.x);
+      let y = Math.floor(point.y);
+
+      for (let i in tracer.x) {
+        let box = tracer.x[i];
+        if (box.index <= x) {
+          if (active.has(box.value)) {
+            active.delete(box.value);
+          } else {
+            active.add(box.value);
+          }
+        } else {
+          break
+        }
       }
 
-      return getRandomValues(rnds8);
-    }
+      let xintersects = [...active];
+      active = new Set();
 
-    /**
-     * Convert array of 16 byte values to UUID string format of the form:
-     * XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
-     */
-    var byteToHex = [];
-
-    for (var i = 0; i < 256; ++i) {
-      byteToHex.push((i + 0x100).toString(16).substr(1));
-    }
-
-    function bytesToUuid(buf, offset_) {
-      var offset = offset_ || 0; // Note: Be careful editing this code!  It's been tuned for performance
-      // and works in ways you may not expect. See https://github.com/uuidjs/uuid/pull/434
-
-      return (byteToHex[buf[offset + 0]] + byteToHex[buf[offset + 1]] + byteToHex[buf[offset + 2]] + byteToHex[buf[offset + 3]] + '-' + byteToHex[buf[offset + 4]] + byteToHex[buf[offset + 5]] + '-' + byteToHex[buf[offset + 6]] + byteToHex[buf[offset + 7]] + '-' + byteToHex[buf[offset + 8]] + byteToHex[buf[offset + 9]] + '-' + byteToHex[buf[offset + 10]] + byteToHex[buf[offset + 11]] + byteToHex[buf[offset + 12]] + byteToHex[buf[offset + 13]] + byteToHex[buf[offset + 14]] + byteToHex[buf[offset + 15]]).toLowerCase();
-    }
-
-    function v4(options, buf, offset) {
-      options = options || {};
-      var rnds = options.random || (options.rng || rng)(); // Per 4.4, set bits for version and `clock_seq_hi_and_reserved`
-
-      rnds[6] = rnds[6] & 0x0f | 0x40;
-      rnds[8] = rnds[8] & 0x3f | 0x80; // Copy bytes to buffer, if provided
-
-      if (buf) {
-        offset = offset || 0;
-
-        for (var i = 0; i < 16; ++i) {
-          buf[offset + i] = rnds[i];
+      for (let i in tracer.y) {
+        let box = tracer.y[i];
+        if (box.index <= y) {
+          if (active.has(box.value)) {
+            active.delete(box.value);
+          } else {
+            active.add(box.value);
+          }
+        } else {
+          break
         }
-
-        return buf;
       }
 
-      return bytesToUuid(rnds);
+      let possibles = [...xintersects].filter(val => active.has(val));
+      return possibles.filter(val => tracer.checks[val](point.x, point.y))
     }
 
-    const subscriber_queue = [];
-    /**
-     * Creates a `Readable` store that allows reading by subscription.
-     * @param value initial value
-     * @param {StartStopNotifier}start start and stop notifications for subscriptions
-     */
-    function readable(value, start) {
-        return {
-            subscribe: writable(value, start).subscribe,
-        };
-    }
-    /**
-     * Create a `Writable` store that allows both updating and reading by subscription.
-     * @param {*=}value initial value
-     * @param {StartStopNotifier=}start start and stop notifications for subscriptions
-     */
-    function writable(value, start = noop) {
-        let stop;
-        const subscribers = [];
-        function set(new_value) {
-            if (safe_not_equal(value, new_value)) {
-                value = new_value;
-                if (stop) { // store is ready
-                    const run_queue = !subscriber_queue.length;
-                    for (let i = 0; i < subscribers.length; i += 1) {
-                        const s = subscribers[i];
-                        s[1]();
-                        subscriber_queue.push(s, value);
-                    }
-                    if (run_queue) {
-                        for (let i = 0; i < subscriber_queue.length; i += 2) {
-                            subscriber_queue[i][0](subscriber_queue[i + 1]);
-                        }
-                        subscriber_queue.length = 0;
-                    }
-                }
-            }
+    function intersectBox (tracer, {min, max}) {
+      let active = new Set();
+      let xmin = Math.floor(min.x);
+      let xmax = Math.floor(max.x);
+      let ymin = Math.floor(min.y);
+      let ymax = Math.floor(max.y);
+
+      for (let i in tracer.x) {
+        let box = tracer.x[i];
+        if (box.index <= xmin) {
+          if (active.has(box.value)) {
+            active.delete(box.value);
+          } else {
+            active.add(box.value);
+          }
+        } else if (box.index <= xmax) {
+          active.add(box.value);
+        } else {
+          break
         }
-        function update(fn) {
-            set(fn(value));
+      }
+
+      let xintersects = [...active];
+      active = new Set();
+
+      for (let i in tracer.y) {
+        let box = tracer.y[i];
+        if (box.index <= ymin) {
+          if (active.has(box.value)) {
+            active.delete(box.value);
+          } else {
+            active.add(box.value);
+          }
+        } else if (box.index <= ymax) {
+          active.add(box.value);
+        } else {
+          break
         }
-        function subscribe(run, invalidate = noop) {
-            const subscriber = [run, invalidate];
-            subscribers.push(subscriber);
-            if (subscribers.length === 1) {
-                stop = start(set) || noop;
-            }
-            run(value);
-            return () => {
-                const index = subscribers.indexOf(subscriber);
-                if (index !== -1) {
-                    subscribers.splice(index, 1);
-                }
-                if (subscribers.length === 0) {
-                    stop();
-                    stop = null;
-                }
-            };
-        }
-        return { set, update, subscribe };
+      }
+
+      return [...xintersects].filter(val => active.has(val))
     }
-    function derived(stores, fn, initial_value) {
-        const single = !Array.isArray(stores);
-        const stores_array = single
-            ? [stores]
-            : stores;
-        const auto = fn.length < 2;
-        return readable(initial_value, (set) => {
-            let inited = false;
-            const values = [];
-            let pending = 0;
-            let cleanup = noop;
-            const sync = () => {
-                if (pending) {
-                    return;
-                }
-                cleanup();
-                const result = fn(single ? values[0] : values, set);
-                if (auto) {
-                    set(result);
-                }
-                else {
-                    cleanup = is_function(result) ? result : noop;
-                }
-            };
-            const unsubscribers = stores_array.map((store, i) => subscribe(store, (value) => {
-                values[i] = value;
-                pending &= ~(1 << i);
-                if (inited) {
-                    sync();
-                }
-            }, () => {
-                pending |= (1 << i);
-            }));
-            inited = true;
-            sync();
-            return function stop() {
-                run_all(unsubscribers);
-                cleanup();
-            };
-        });
+
+    function boxesIntersect(one, two) {
+      if (one.max.x < two.min.x) return false
+      if (two.max.x < one.min.x) return false
+      if (one.max.y < two.min.y) return false
+      if (two.max.y < two.max.y) return false
+      return true
     }
+
+    function generateHitChecker$1(context, path, transform) {
+      return (x, y) => {
+        context.save();
+        context.setTransform(...transform);
+        const inPath = context.isPointInPath(path, x, y);
+        context.restore();
+        return inPath
+      }
+    }
+
+    var tracer$1 = {
+      tracer,
+      insert: insert$1,
+      concat,
+      intersectPoint,
+      intersectBox,
+      boxesIntersect,
+      generateHitChecker: generateHitChecker$1,
+    };
+
+    var tracer$2 = /*#__PURE__*/Object.freeze({
+        __proto__: null,
+        'default': tracer$1
+    });
 
     const defaults = {
       fillStyle: null,
@@ -746,167 +781,454 @@ var app = (function () {
         'default': measure
     });
 
-    function sorter (a, b) {
-      if (a.index < b.index) return -1
-      if (a.index > b.index) return 1
-      return 0
-    }
+    var events = {
 
-    function tracer (init = []) { // init is filled with objects that have a min point, a max point, and a value
-      const tracer = {
-        x: [],
-        y: [],
-        checks: {}
-      };
-
-      return concat(tracer, init)
-    }
-
-    function insert$1 (tracer, {min, max, value, check}) {
-      tracer.checks[value] = check;
-      tracer.x.push({index: Math.floor(min.x), value});
-      tracer.x.push({index: Math.floor(max.x), value});
-      tracer.x.sort(sorter);
-
-      tracer.y.push({index: Math.floor(min.y), value});
-      tracer.y.push({index: Math.floor(max.y), value});
-      tracer.y.sort(sorter);
-    }
-
-    function concat (tracer, boxes) {
-      boxes.forEach(box => tracer.checks[box.value]=box.check);
-
-      tracer.x = boxes.map(({min, value}) => {
-        return {index: Math.floor(min.x), value}
-      }).concat(boxes.map(({max, value}) => {
-        return {index: Math.floor(max.x), value}
-      }));
-
-      tracer.y = boxes.map(({min, value}) => {
-        return {index: Math.floor(min.y), value}
-      }).concat(boxes.map(({max, value}) => {
-        return {index: Math.floor(max.y), value}
-      }));
-
-      tracer.x.sort(sorter);
-      tracer.y.sort(sorter);
-
-      return tracer
-    }
-
-    function intersectPoint (tracer, point) {
-      let active = new Set();
-      let x = Math.floor(point.x);
-      let y = Math.floor(point.y);
-
-      for (let i in tracer.x) {
-        let box = tracer.x[i];
-        if (box.index <= x) {
-          if (active.has(box.value)) {
-            active.delete(box.value);
-          } else {
-            active.add(box.value);
-          }
-        } else {
-          break
-        }
-      }
-
-      let xintersects = [...active];
-      active = new Set();
-
-      for (let i in tracer.y) {
-        let box = tracer.y[i];
-        if (box.index <= y) {
-          if (active.has(box.value)) {
-            active.delete(box.value);
-          } else {
-            active.add(box.value);
-          }
-        } else {
-          break
-        }
-      }
-
-      let possibles = [...xintersects].filter(val => active.has(val));
-      return possibles.filter(val => tracer.checks[val](point.x, point.y))
-    }
-
-    function intersectBox (tracer, {min, max}) {
-      let active = new Set();
-      let xmin = Math.floor(min.x);
-      let xmax = Math.floor(max.x);
-      let ymin = Math.floor(min.y);
-      let ymax = Math.floor(max.y);
-
-      for (let i in tracer.x) {
-        let box = tracer.x[i];
-        if (box.index <= xmin) {
-          if (active.has(box.value)) {
-            active.delete(box.value);
-          } else {
-            active.add(box.value);
-          }
-        } else if (box.index <= xmax) {
-          active.add(box.value);
-        } else {
-          break
-        }
-      }
-
-      let xintersects = [...active];
-      active = new Set();
-
-      for (let i in tracer.y) {
-        let box = tracer.y[i];
-        if (box.index <= ymin) {
-          if (active.has(box.value)) {
-            active.delete(box.value);
-          } else {
-            active.add(box.value);
-          }
-        } else if (box.index <= ymax) {
-          active.add(box.value);
-        } else {
-          break
-        }
-      }
-
-      return [...xintersects].filter(val => active.has(val))
-    }
-
-    function boxesIntersect(one, two) {
-      if (one.max.x < two.min.x) return false
-      if (two.max.x < one.min.x) return false
-      if (one.max.y < two.min.y) return false
-      if (two.max.y < two.max.y) return false
-      return true
-    }
-
-    function generateHitChecker$1(context, path, transform) {
-      return (x, y) => {
-        context.save();
-        context.setTransform(...transform);
-        const inPath = context.isPointInPath(path, x, y);
-        context.restore();
-        return inPath
-      }
-    }
-
-    var tracer$1 = {
-      tracer,
-      insert: insert$1,
-      concat,
-      intersectPoint,
-      intersectBox,
-      boxesIntersect,
-      generateHitChecker: generateHitChecker$1,
     };
 
-    var tracer$2 = /*#__PURE__*/Object.freeze({
-        __proto__: null,
-        'default': tracer$1
+    function enforceBoundaries (geo) {
+      let zoom = geo.camera.transform[0];
+      const width = geo.camera.area.width;
+      const height = geo.camera.area.height;
+      const right = geo.camera.extents.max.x;
+      const left = geo.camera.extents.min.x;
+      const top = geo.camera.extents.min.y;
+      const bottom = geo.camera.extents.max.y;
+
+      if (zoom < minZoom(geo)) {
+        zoom = minZoom;
+      } else if (geo.camera.extents.max.zoom && zoom > geo.camera.extents.max.zoom) {
+        zoom = geo.camera.extents.max.zoom;
+      }
+
+      geo.camera.transform[0] = zoom;
+      geo.camera.transform[3] = zoom;
+
+      let x = geo.camera.transform[4];
+      let y = geo.camera.transform[5];
+      let maxX = -left;
+      let minX = width - right*zoom;
+      let maxY = -top;
+      let minY = height - bottom*zoom;
+
+      if (left !== null && x < minX) geo.camera.transform[4] = minX;
+      if (right !== null && x > maxX) geo.camera.transform[4] = maxX;
+      if (top !== null && y < minY) geo.camera.transform[5] = minY;
+      if (bottom !== null && y > maxY) geo.camera.transform[5] = maxY;
+    }
+
+    function minZoom(geo) {
+      const width = geo.camera.area.width;
+      const height = geo.camera.area.height;
+      const right = geo.camera.extents.max.x;
+      const left = geo.camera.extents.min.x;
+      const top = geo.camera.extents.min.y;
+      const bottom = geo.camera.extents.max.y;
+
+      const possibleMinZoom = [geo.camera.extents.min.zoom];
+      if (right !== null && left !== null) possibleMinZoom.push(width/(right-left));
+      if (top !== null && bottom !== null) possibleMinZoom.push(height/(bottom-top));
+      const minZoom = Math.max(...possibleMinZoom);
+
+      return minZoom
+    }
+
+    function mouseZoom (mouse, geo, speed=1.2) {
+      let zoom = geo.camera.transform[0] * (speed ** -Math.sign(mouse.deltaY));
+      zoom = zoom > geo.camera.extents.max.zoom ? geo.camera.extents.max.zoom : zoom;
+      const min = minZoom(geo);
+      zoom = zoom < min ? min : zoom;
+      if (zoom !== geo.camera.transform) {
+        let factor = zoom / geo.camera.transform[0];
+        let x = mouse.clientX;
+        let y = mouse.clientY;
+        geo.camera.transform[4] = x - factor * (x-geo.camera.transform[4]);
+        geo.camera.transform[5] = y - factor * (y-geo.camera.transform[5]);
+        geo.camera.transform[0] = zoom;
+        geo.camera.transform[3] = zoom;
+        enforceBoundaries(geo);
+      }
+
+      mouse.preventDefault();
+      mouse.stopPropagation();
+    }
+
+    var view = {
+      enforceBoundaries,
+      mouseZoom
+    };
+
+    const shapes = {};
+    const styles = {};
+    const subjects = {};
+    const renderers = {};
+    const modes = {};
+
+    function renderer(id, func) {
+      renderers[id] = (context, subject, assets) => {
+        if (subject.visible) {
+          context.save();
+          context.transform(...(subject.transform));
+          func(context, subject.details, assets);
+          context.restore();
+        }
+      };
+    }
+
+    renderer("simple", (context, {shape, style, trace}, {viewport, hitChecker, tome}) => {
+      const t = context.getTransform();
+      const transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+      const {box, path} = tome.shape(shape);
+      const finalBox = measure.transformBox(box, transform);
+      if (tracer$1.boxesIntersect(viewport, finalBox)) {
+        if (trace) {
+          tracer$1.insert(hitChecker, {...finalBox, value: trace, check: tracer$1.generateHitChecker(context, path.shape, transform)});
+        }
+        tome.style(style).painter(context, path);
+      }
     });
+
+    renderer("nested", (context, {subjects}, assets) => {
+      subjects.forEach(sub => {
+        const subject = assets.tome.subject(sub);
+        const render = assets.tome.renderer(subject.renderer);
+        render(context, subject, assets);
+      });
+    });
+
+    renderer("text", (context, {style, text, x, y, maxWidth}, {tome}) => {
+      tome.style(style).painter(context, {text, x, y, maxWidth});
+    });
+
+    function mode(id, controls, init) {
+      modes[id] = {
+        controls,
+        init
+      };
+    }
+
+    mode(
+      null,
+      {},
+      () => null
+    );
+
+    mode(
+      "default",
+      {
+        mousedown: (mouse, {geo, elem}) => {
+          elem.set("panning", {
+            x: mouse.clientX,
+            y: mouse.clientY,
+            geo,
+            elem,
+            previousMode: "default",
+            previousState: { geo, elem }
+          });
+        },
+        wheel: (mouse, {geo}) => {
+          view.mouseZoom(mouse, geo);
+        }
+      },
+      (state) => state
+    );
+
+    mode(
+      "panning",
+      {
+      	mouseup: (mouse, { elem, previousMode, previousState }) => { elem.set(previousMode, previousState); },
+      	mouseout: (mouse, { elem, previousMode, previousState }) => { elem.set(previousMode, previousState); },
+        mouseenter: (mouse, state) => {
+          state.lastX = mouse.clientX;
+          state.lastY = mouse.clientY;
+        },
+      	mousemove: (mouse, state) => {
+          state.geo.camera.transform[4] = state.geo.camera.transform[4] + mouse.clientX - state.lastX;
+          state.geo.camera.transform[5] = state.geo.camera.transform[5] + mouse.clientY - state.lastY;
+          state.lastX = mouse.clientX;
+          state.lastY = mouse.clientY;
+          view.enforceBoundaries(state.geo);
+        },
+      },
+      ({x, y, geo, elem, previousMode, previousState}) => {
+        return {
+          lastX: x,
+          lastY: y,
+          geo,
+          elem,
+          previousMode,
+          previousState
+        }
+      }
+    );
+
+    var tome = {
+      register: {
+        shape: (id, instructions) => {
+          shapes[id] = {
+            instructions,
+            path: measure.pathToCanvas(instructions),
+            box: measure.pathToBox(instructions)
+          };
+        },
+        style: (id, styling) => {
+          styles[id] = {
+            styling,
+            painter: style.palletteToPainter(styling)
+          };
+        },
+        subject: (id, {renderer, details, visible, transform}) => {
+          subjects[id] = {
+            renderer,
+            details,
+            visible,
+            transform
+          };
+        },
+        renderer,
+        mode,
+      },
+      shape: (id) => shapes[id],
+      style: (id) => styles[id],
+      subject: (id) => subjects[id],
+      renderer: (id) => renderers[id],
+      mode: (id) => modes[id],
+      export: () => JSON.stringify({subjects, shapes, styles}),
+      import: (json) => {
+        imports = JSON.parse(json);
+        shapes = {
+          ...shapes,
+          ...(imports.shapes)
+        };
+        styles = {
+          ...styles,
+          ...(imports.styles)
+        };
+        subjects = {
+          ...subjects,
+          ...(imports.subjects)
+        };
+      }
+    };
+
+    function elemental (el) {
+      const internal = {
+        mode: null,
+        listeners: [],
+      };
+
+      return {
+        set: (nextMode, initParams) => {
+          const state = tome.mode(nextMode).init(initParams);
+          internal.listeners.forEach(([ev, handler]) => el.removeEventListener(ev, handler));
+
+          let handlers = [];
+          let controls = tome.mode(nextMode).controls;
+          for (const ev in controls) {
+            handlers.push([ev, (event) => controls[ev](event, state, el)]);
+          }
+          handlers.forEach(([ev, handler]) => el.addEventListener(ev, handler));
+
+          internal.listeners = handlers;
+          internal.mode = nextMode;
+        },
+        element: () => el,
+        mode: () => internal.mode
+      }
+    }
+
+    function geomancer () {
+      const geomancer = {
+        camera: {
+          transform: [1, 0, 0, 1, 0, 0],
+          extents: {
+            min: {x: null, y: null, zoom: null},
+            max: {x: null, y: null, zoom: null},
+          },
+          area: {
+            width: 800,
+            height: 800
+          }
+        },
+        scene: [],
+        tome
+      };
+
+      geomancer.render = (context) => {
+        context.setTransform(1, 0, 0, 1, 0, 0);
+        context.clearRect(0, 0, geomancer.camera.area.width, geomancer.camera.area.height);
+        context.setTransform(...geomancer.camera.transform);
+        const viewport = measure.transformBox(
+          {
+            min: {x: 0, y: 0},
+            max: {x: geomancer.camera.area.width, y: geomancer.camera.area.height}
+          },
+          geomancer.camera.transform
+        );
+        const hitChecker = tracer$1.tracer();
+        geomancer.scene.forEach(sub => {
+          const subject = tome.subject(sub);
+          const render = tome.renderer(subject.renderer);
+          if (render) render(context, subject, {viewport, hitChecker, tome});
+        });
+      };
+
+      return geomancer
+    }
+
+    // Unique ID creation requires a high quality random # generator. In the browser we therefore
+    // require the crypto API and do not support built-in fallback to lower quality random number
+    // generators (like Math.random()).
+    // getRandomValues needs to be invoked in a context where "this" is a Crypto implementation. Also,
+    // find the complete implementation of crypto (msCrypto) on IE11.
+    var getRandomValues = typeof crypto !== 'undefined' && crypto.getRandomValues && crypto.getRandomValues.bind(crypto) || typeof msCrypto !== 'undefined' && typeof msCrypto.getRandomValues === 'function' && msCrypto.getRandomValues.bind(msCrypto);
+    var rnds8 = new Uint8Array(16);
+    function rng() {
+      if (!getRandomValues) {
+        throw new Error('crypto.getRandomValues() not supported. See https://github.com/uuidjs/uuid#getrandomvalues-not-supported');
+      }
+
+      return getRandomValues(rnds8);
+    }
+
+    /**
+     * Convert array of 16 byte values to UUID string format of the form:
+     * XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+     */
+    var byteToHex = [];
+
+    for (var i = 0; i < 256; ++i) {
+      byteToHex.push((i + 0x100).toString(16).substr(1));
+    }
+
+    function bytesToUuid(buf, offset_) {
+      var offset = offset_ || 0; // Note: Be careful editing this code!  It's been tuned for performance
+      // and works in ways you may not expect. See https://github.com/uuidjs/uuid/pull/434
+
+      return (byteToHex[buf[offset + 0]] + byteToHex[buf[offset + 1]] + byteToHex[buf[offset + 2]] + byteToHex[buf[offset + 3]] + '-' + byteToHex[buf[offset + 4]] + byteToHex[buf[offset + 5]] + '-' + byteToHex[buf[offset + 6]] + byteToHex[buf[offset + 7]] + '-' + byteToHex[buf[offset + 8]] + byteToHex[buf[offset + 9]] + '-' + byteToHex[buf[offset + 10]] + byteToHex[buf[offset + 11]] + byteToHex[buf[offset + 12]] + byteToHex[buf[offset + 13]] + byteToHex[buf[offset + 14]] + byteToHex[buf[offset + 15]]).toLowerCase();
+    }
+
+    function v4(options, buf, offset) {
+      options = options || {};
+      var rnds = options.random || (options.rng || rng)(); // Per 4.4, set bits for version and `clock_seq_hi_and_reserved`
+
+      rnds[6] = rnds[6] & 0x0f | 0x40;
+      rnds[8] = rnds[8] & 0x3f | 0x80; // Copy bytes to buffer, if provided
+
+      if (buf) {
+        offset = offset || 0;
+
+        for (var i = 0; i < 16; ++i) {
+          buf[offset + i] = rnds[i];
+        }
+
+        return buf;
+      }
+
+      return bytesToUuid(rnds);
+    }
+
+    const subscriber_queue = [];
+    /**
+     * Creates a `Readable` store that allows reading by subscription.
+     * @param value initial value
+     * @param {StartStopNotifier}start start and stop notifications for subscriptions
+     */
+    function readable(value, start) {
+        return {
+            subscribe: writable(value, start).subscribe,
+        };
+    }
+    /**
+     * Create a `Writable` store that allows both updating and reading by subscription.
+     * @param {*=}value initial value
+     * @param {StartStopNotifier=}start start and stop notifications for subscriptions
+     */
+    function writable(value, start = noop) {
+        let stop;
+        const subscribers = [];
+        function set(new_value) {
+            if (safe_not_equal(value, new_value)) {
+                value = new_value;
+                if (stop) { // store is ready
+                    const run_queue = !subscriber_queue.length;
+                    for (let i = 0; i < subscribers.length; i += 1) {
+                        const s = subscribers[i];
+                        s[1]();
+                        subscriber_queue.push(s, value);
+                    }
+                    if (run_queue) {
+                        for (let i = 0; i < subscriber_queue.length; i += 2) {
+                            subscriber_queue[i][0](subscriber_queue[i + 1]);
+                        }
+                        subscriber_queue.length = 0;
+                    }
+                }
+            }
+        }
+        function update(fn) {
+            set(fn(value));
+        }
+        function subscribe(run, invalidate = noop) {
+            const subscriber = [run, invalidate];
+            subscribers.push(subscriber);
+            if (subscribers.length === 1) {
+                stop = start(set) || noop;
+            }
+            run(value);
+            return () => {
+                const index = subscribers.indexOf(subscriber);
+                if (index !== -1) {
+                    subscribers.splice(index, 1);
+                }
+                if (subscribers.length === 0) {
+                    stop();
+                    stop = null;
+                }
+            };
+        }
+        return { set, update, subscribe };
+    }
+    function derived(stores, fn, initial_value) {
+        const single = !Array.isArray(stores);
+        const stores_array = single
+            ? [stores]
+            : stores;
+        const auto = fn.length < 2;
+        return readable(initial_value, (set) => {
+            let inited = false;
+            const values = [];
+            let pending = 0;
+            let cleanup = noop;
+            const sync = () => {
+                if (pending) {
+                    return;
+                }
+                cleanup();
+                const result = fn(single ? values[0] : values, set);
+                if (auto) {
+                    set(result);
+                }
+                else {
+                    cleanup = is_function(result) ? result : noop;
+                }
+            };
+            const unsubscribers = stores_array.map((store, i) => subscribe(store, (value) => {
+                values[i] = value;
+                pending &= ~(1 << i);
+                if (inited) {
+                    sync();
+                }
+            }, () => {
+                pending |= (1 << i);
+            }));
+            inited = true;
+            sync();
+            return function stop() {
+                run_all(unsubscribers);
+                cleanup();
+            };
+        });
+    }
 
     function path(instructions) {
       const pathStore = writable(instructions);
@@ -1145,88 +1467,6 @@ var app = (function () {
       }
     }
 
-    var events = {
-
-    };
-
-    const lastX = {};
-    const lastY = {};
-    const isPanning = {};
-
-    function enforceBoundaries (width, height, transform, extents, maxZoom=null) {
-      let zoom = transform[0];
-      let minZoom = Math.max(width/(extents.right-extents.left), height/(extents.bottom-extents.top));
-
-      if (zoom < minZoom) {
-        zoom = minZoom;
-      } else if (maxZoom && zoom > maxZoom) {
-        zoom = maxZoom;
-      }
-      transform[0] = zoom;
-      transform[3] = zoom;
-
-      let x = transform[4];
-      let y = transform[5];
-      let maxX = -extents.left*zoom;
-      let minX = width-extents.right*zoom;
-      let maxY = -extents.top*zoom;
-      let minY = height-extents.bottom*zoom;
-
-      if (x < minX) transform[4] = minX;
-      if (x > maxX) transform[4] = maxX;
-      if (y < minY) transform[5] = minY;
-      if (y > maxY) transform[5] = maxY;
-    }
-
-    function stableZoom (x, y, zoom, transform) {
-      let target = [...transform];
-      target[0] = zoom;
-      target[3] = zoom;
-      let factor = zoom/transform[0];
-      target[4] = x - factor * (x-transform[4]);
-      target[5] = y - factor * (y-transform[5]);
-      return target
-    }
-
-    function startPanning (x, y, id) {
-      lastX[id] = x;
-      lastY[id] = y;
-      isPanning[id] = true;
-    }
-
-    function panning (x, y, transform, id) {
-      if (!isPanning[id]) {
-        return transform;
-      }
-      let target = [...transform];
-      target[4] = transform[4] + x - lastX[id];
-      target[5] = transform[5] + y - lastY[id];
-      lastX[id] = x;
-      lastY[id] = y;
-      return target
-    }
-
-    function stopPanning (id) {
-      isPanning[id] = false;
-    }
-
-    function mouseZoom (mouse, transform, speed=1.2) {
-      let zoom = transform[0] * (speed ** -Math.sign(mouse.deltaY));
-      mouse.preventDefault();
-      mouse.stopPropagation();
-
-      return stableZoom(mouse.offsetX, mouse.offsetY, zoom, transform)
-    }
-
-    var view = {
-      enforceBoundaries,
-      stableZoom,
-      startPanning,
-      panning,
-      stopPanning,
-      mouseZoom
-    };
-
     const hexPath = path([
       ['moveTo', 2.5, 43.3],
       ['lineTo', 26.25, 84.77],
@@ -1252,7 +1492,7 @@ var app = (function () {
     const boundarySubject = subject(boundaryPattern, [1, 0, 0, 1, 0, 0], true, "boundaries");
     const hexSubject = subject(hexPattern, [1, 0, 0, 1, 100, 100], true, "lone hexagon");
     const baseLayer = frame([boundarySubject, hexSubject], [1, 0, 0, 1, 0, 0], true);
-    const geomancer = camera([baseLayer], [1, 0, 0, 1, 0, 0], 800, 800);
+    const geomancer$1 = camera([baseLayer], [1, 0, 0, 1, 0, 0], 800, 800);
 
     let extents = {left: 0, right: 800, top: 0, bottom: 800};
     let maxZoom = 5;
@@ -1280,7 +1520,7 @@ var app = (function () {
     };
 
     var example = {
-      camera: geomancer,
+      camera: geomancer$1,
       handlers
     };
 
@@ -1316,7 +1556,7 @@ var app = (function () {
     }
 
 
-    var subjects = {
+    var subjects$1 = {
       order,
       resolve
     };
@@ -1406,43 +1646,36 @@ var app = (function () {
     	let canvas_1;
     	let canvas_1_width_value;
     	let canvas_1_height_value;
-    	let eventHandlers_action;
-    	let dispose;
 
     	const block = {
     		c: function create() {
     			canvas_1 = element("canvas");
     			this.c = noop;
-    			attr_dev(canvas_1, "width", canvas_1_width_value = "" + (/*width*/ ctx[1] + "px"));
-    			attr_dev(canvas_1, "height", canvas_1_height_value = "" + (/*height*/ ctx[2] + "px"));
-    			add_location(canvas_1, file, 79, 0, 1762);
+    			attr_dev(canvas_1, "width", canvas_1_width_value = "" + (/*geo*/ ctx[0].camera.area.width + "px"));
+    			attr_dev(canvas_1, "height", canvas_1_height_value = "" + (/*geo*/ ctx[0].camera.area.height + "px"));
+    			add_location(canvas_1, file, 60, 0, 1166);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
-    		m: function mount(target, anchor, remount) {
+    		m: function mount(target, anchor) {
     			insert_dev(target, canvas_1, anchor);
-    			/*canvas_1_binding*/ ctx[9](canvas_1);
-    			if (remount) dispose();
-    			dispose = action_destroyer(eventHandlers_action = /*eventHandlers*/ ctx[4].call(null, canvas_1, /*handlers*/ ctx[0]));
+    			/*canvas_1_binding*/ ctx[6](canvas_1);
     		},
     		p: function update(ctx, [dirty]) {
-    			if (dirty & /*width*/ 2 && canvas_1_width_value !== (canvas_1_width_value = "" + (/*width*/ ctx[1] + "px"))) {
+    			if (dirty & /*geo*/ 1 && canvas_1_width_value !== (canvas_1_width_value = "" + (/*geo*/ ctx[0].camera.area.width + "px"))) {
     				attr_dev(canvas_1, "width", canvas_1_width_value);
     			}
 
-    			if (dirty & /*height*/ 4 && canvas_1_height_value !== (canvas_1_height_value = "" + (/*height*/ ctx[2] + "px"))) {
+    			if (dirty & /*geo*/ 1 && canvas_1_height_value !== (canvas_1_height_value = "" + (/*geo*/ ctx[0].camera.area.height + "px"))) {
     				attr_dev(canvas_1, "height", canvas_1_height_value);
     			}
-
-    			if (eventHandlers_action && is_function(eventHandlers_action.update) && dirty & /*handlers*/ 1) eventHandlers_action.update.call(null, /*handlers*/ ctx[0]);
     		},
     		i: noop,
     		o: noop,
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(canvas_1);
-    			/*canvas_1_binding*/ ctx[9](null);
-    			dispose();
+    			/*canvas_1_binding*/ ctx[6](null);
     		}
     	};
 
@@ -1458,63 +1691,35 @@ var app = (function () {
     }
 
     function instance($$self, $$props, $$invalidate) {
-    	let { id = v4() } = $$props;
-    	let { camera = example.camera } = $$props;
-    	let { handlers = example.handlers } = $$props;
-    	let width = 800;
-    	let height = 800;
-
-    	camera.subscribe(camera => {
-    		$$invalidate(1, width = camera.width);
-    		$$invalidate(2, height = camera.height);
-    	});
-
+    	let { geo = geomancer() } = $$props;
+    	let { mode = { name: "default", state: {} } } = $$props;
     	let canvas;
-    	const context = writable(null);
+    	let controls = writable(mode);
+    	let frame;
 
-    	const paintStore = derived([context, camera], ([context, camera]) => {
+    	function drawingLoop(context) {
+    		(function loop() {
+    			frame = requestAnimationFrame(loop);
+    			geo.render(context);
+    		})();
+
     		return () => {
-    			if (context) {
-    				context.clearRect(0, 0, width, height);
-    				camera.draw(context);
-    			}
-    		};
-    	});
-
-    	paintStore.subscribe(draw => draw());
-
-    	function eventHandlers(node, events) {
-    		let handlers = [];
-    		let localContext = { camera, id };
-
-    		for (const ev in events) {
-    			handlers.push([ev, event => events[ev](event, localContext)]);
-    		}
-
-    		handlers.forEach(([ev, handler]) => node.addEventListener(ev, handler));
-
-    		return {
-    			update(newHandlers) {
-    				handlers.forEach(([ev, handler]) => node.removeEventListener(ev, handler));
-    				handlers = [];
-
-    				for (const ev in newHandlers) {
-    					handlers.push([ev, event => events[ev](event, localContext)]);
-    				}
-
-    				handlers.forEach(([ev, handler]) => node.addEventListener(ev, handler));
-    			},
-    			destroy() {
-    				handlers.forEach(([ev, handler]) => node.removeEventListener(ev, handler));
-    			}
+    			cancelAnimationFrame(frame);
     		};
     	}
 
     	onMount(() => {
-    		context.set(canvas.getContext("2d"));
+    		geo.render(canvas.getContext("2d"));
+    		const elem = elemental(canvas);
+
+    		controls.subscribe(() => {
+    			elem.set(mode.name, { elem, geo, ...mode.state });
+    		});
+
+    		return drawingLoop(canvas.getContext("2d"));
     	});
 
-    	const writable_props = ["id", "camera", "handlers"];
+    	const writable_props = ["geo", "mode"];
 
     	Object.keys($$props).forEach(key => {
     		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<geomancer-scene> was created with unknown prop '${key}'`);
@@ -1525,14 +1730,13 @@ var app = (function () {
 
     	function canvas_1_binding($$value) {
     		binding_callbacks[$$value ? "unshift" : "push"](() => {
-    			$$invalidate(3, canvas = $$value);
+    			$$invalidate(1, canvas = $$value);
     		});
     	}
 
     	$$self.$set = $$props => {
-    		if ("id" in $$props) $$invalidate(5, id = $$props.id);
-    		if ("camera" in $$props) $$invalidate(6, camera = $$props.camera);
-    		if ("handlers" in $$props) $$invalidate(0, handlers = $$props.handlers);
+    		if ("geo" in $$props) $$invalidate(0, geo = $$props.geo);
+    		if ("mode" in $$props) $$invalidate(2, mode = $$props.mode);
     	};
 
     	$$self.$capture_state = () => ({
@@ -1547,51 +1751,44 @@ var app = (function () {
     		events,
     		handles,
     		view,
-    		subjects,
+    		subjects: subjects$1,
     		example,
     		uuidv4: v4,
-    		id,
-    		camera,
-    		handlers,
-    		width,
-    		height,
+    		geomancer,
+    		elemental,
+    		geo,
+    		mode,
     		canvas,
-    		context,
-    		paintStore,
-    		eventHandlers
+    		controls,
+    		frame,
+    		drawingLoop
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ("id" in $$props) $$invalidate(5, id = $$props.id);
-    		if ("camera" in $$props) $$invalidate(6, camera = $$props.camera);
-    		if ("handlers" in $$props) $$invalidate(0, handlers = $$props.handlers);
-    		if ("width" in $$props) $$invalidate(1, width = $$props.width);
-    		if ("height" in $$props) $$invalidate(2, height = $$props.height);
-    		if ("canvas" in $$props) $$invalidate(3, canvas = $$props.canvas);
+    		if ("geo" in $$props) $$invalidate(0, geo = $$props.geo);
+    		if ("mode" in $$props) $$invalidate(2, mode = $$props.mode);
+    		if ("canvas" in $$props) $$invalidate(1, canvas = $$props.canvas);
+    		if ("controls" in $$props) $$invalidate(4, controls = $$props.controls);
+    		if ("frame" in $$props) frame = $$props.frame;
     	};
 
     	if ($$props && "$$inject" in $$props) {
     		$$self.$inject_state($$props.$$inject);
     	}
 
-    	return [
-    		handlers,
-    		width,
-    		height,
-    		canvas,
-    		eventHandlers,
-    		id,
-    		camera,
-    		context,
-    		paintStore,
-    		canvas_1_binding
-    	];
+    	$$self.$$.update = () => {
+    		if ($$self.$$.dirty & /*mode*/ 4) {
+    			 controls.set(mode);
+    		}
+    	};
+
+    	return [geo, canvas, mode, frame, controls, drawingLoop, canvas_1_binding];
     }
 
     class Geomancer extends SvelteElement {
     	constructor(options) {
     		super();
-    		init(this, { target: this.shadowRoot }, instance, create_fragment, safe_not_equal, { id: 5, camera: 6, handlers: 0 });
+    		init(this, { target: this.shadowRoot }, instance, create_fragment, safe_not_equal, { geo: 0, mode: 2 });
 
     		if (options) {
     			if (options.target) {
@@ -1606,33 +1803,24 @@ var app = (function () {
     	}
 
     	static get observedAttributes() {
-    		return ["id", "camera", "handlers"];
+    		return ["geo", "mode"];
     	}
 
-    	get id() {
-    		return this.$$.ctx[5];
-    	}
-
-    	set id(id) {
-    		this.$set({ id });
-    		flush();
-    	}
-
-    	get camera() {
-    		return this.$$.ctx[6];
-    	}
-
-    	set camera(camera) {
-    		this.$set({ camera });
-    		flush();
-    	}
-
-    	get handlers() {
+    	get geo() {
     		return this.$$.ctx[0];
     	}
 
-    	set handlers(handlers) {
-    		this.$set({ handlers });
+    	set geo(geo) {
+    		this.$set({ geo });
+    		flush();
+    	}
+
+    	get mode() {
+    		return this.$$.ctx[2];
+    	}
+
+    	set mode(mode) {
+    		this.$set({ mode });
     		flush();
     	}
     }
@@ -1648,11 +1836,212 @@ var app = (function () {
         tracer: tracer$1
     });
 
+    /* src/Example.svelte generated by Svelte v3.20.1 */
+
+    function create_fragment$1(ctx) {
+    	let updating_geo;
+    	let updating_mode;
+    	let current;
+
+    	function geomancer_1_geo_binding(value) {
+    		/*geomancer_1_geo_binding*/ ctx[2].call(null, value);
+    	}
+
+    	function geomancer_1_mode_binding(value) {
+    		/*geomancer_1_mode_binding*/ ctx[3].call(null, value);
+    	}
+
+    	let geomancer_1_props = {};
+
+    	if (/*geo*/ ctx[0] !== void 0) {
+    		geomancer_1_props.geo = /*geo*/ ctx[0];
+    	}
+
+    	if (/*mode*/ ctx[1] !== void 0) {
+    		geomancer_1_props.mode = /*mode*/ ctx[1];
+    	}
+
+    	const geomancer_1 = new Geomancer({ props: geomancer_1_props, $$inline: true });
+    	binding_callbacks.push(() => bind(geomancer_1, "geo", geomancer_1_geo_binding));
+    	binding_callbacks.push(() => bind(geomancer_1, "mode", geomancer_1_mode_binding));
+
+    	const block = {
+    		c: function create() {
+    			create_component(geomancer_1.$$.fragment);
+    			this.c = noop;
+    		},
+    		l: function claim(nodes) {
+    			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
+    		},
+    		m: function mount(target, anchor) {
+    			mount_component(geomancer_1, target, anchor);
+    			current = true;
+    		},
+    		p: function update(ctx, [dirty]) {
+    			const geomancer_1_changes = {};
+
+    			if (!updating_geo && dirty & /*geo*/ 1) {
+    				updating_geo = true;
+    				geomancer_1_changes.geo = /*geo*/ ctx[0];
+    				add_flush_callback(() => updating_geo = false);
+    			}
+
+    			if (!updating_mode && dirty & /*mode*/ 2) {
+    				updating_mode = true;
+    				geomancer_1_changes.mode = /*mode*/ ctx[1];
+    				add_flush_callback(() => updating_mode = false);
+    			}
+
+    			geomancer_1.$set(geomancer_1_changes);
+    		},
+    		i: function intro(local) {
+    			if (current) return;
+    			transition_in(geomancer_1.$$.fragment, local);
+    			current = true;
+    		},
+    		o: function outro(local) {
+    			transition_out(geomancer_1.$$.fragment, local);
+    			current = false;
+    		},
+    		d: function destroy(detaching) {
+    			destroy_component(geomancer_1, detaching);
+    		}
+    	};
+
+    	dispatch_dev("SvelteRegisterBlock", {
+    		block,
+    		id: create_fragment$1.name,
+    		type: "component",
+    		source: "",
+    		ctx
+    	});
+
+    	return block;
+    }
+
+    function instance$1($$self, $$props, $$invalidate) {
+    	tome.register.shape("hexagon", [
+    		["moveTo", 2.5, 43.3],
+    		["lineTo", 26.25, 84.77],
+    		["lineTo", 73.75, 84.77],
+    		["lineTo", 97.5, 43.3],
+    		["lineTo", 73.75, 2.165],
+    		["lineTo", 26.25, 2.165],
+    		["closePath"]
+    	]);
+
+    	tome.register.shape("boundary", [["rect", 10, 10, 780, 780]]);
+
+    	tome.register.style("black", {
+    		fillStyle: "black",
+    		lineWidth: 3,
+    		lineJoin: "round"
+    	});
+
+    	tome.register.style("thinBlackLines", {
+    		lineWidth: 5,
+    		strokeStyle: "black",
+    		lineJoin: "round"
+    	});
+
+    	tome.register.subject("lone hex", {
+    		details: {
+    			shape: "hexagon",
+    			style: "black",
+    			trace: "lone hex"
+    		},
+    		transform: [1, 0, 0, 1, 100, 100],
+    		visible: true,
+    		renderer: "simple"
+    	});
+
+    	tome.register.subject("boundaries", {
+    		details: {
+    			shape: "boundary",
+    			style: "thinBlackLines",
+    			trace: "lone hex"
+    		},
+    		transform: [1, 0, 0, 1, 0, 0],
+    		visible: true,
+    		renderer: "simple"
+    	});
+
+    	tome.register.subject("base layer", {
+    		details: { subjects: ["lone hex", "boundaries"] },
+    		transform: [1, 0, 0, 1, 0, 0],
+    		visible: true,
+    		renderer: "nested"
+    	});
+
+    	let geo = geomancer();
+
+    	geo.camera.extents = {
+    		min: { x: 0, y: 0, zoom: null },
+    		max: { x: 800, y: 800, zoom: 5 }
+    	};
+
+    	geo.scene = ["base layer"];
+    	let mode = { name: "default", state: {} };
+    	const writable_props = [];
+
+    	Object.keys($$props).forEach(key => {
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<geomancer-example> was created with unknown prop '${key}'`);
+    	});
+
+    	let { $$slots = {}, $$scope } = $$props;
+    	validate_slots("geomancer-example", $$slots, []);
+
+    	function geomancer_1_geo_binding(value) {
+    		geo = value;
+    		$$invalidate(0, geo);
+    	}
+
+    	function geomancer_1_mode_binding(value) {
+    		mode = value;
+    		$$invalidate(1, mode);
+    	}
+
+    	$$self.$capture_state = () => ({ Geomancer, geomancer, tome, geo, mode });
+
+    	$$self.$inject_state = $$props => {
+    		if ("geo" in $$props) $$invalidate(0, geo = $$props.geo);
+    		if ("mode" in $$props) $$invalidate(1, mode = $$props.mode);
+    	};
+
+    	if ($$props && "$$inject" in $$props) {
+    		$$self.$inject_state($$props.$$inject);
+    	}
+
+    	return [geo, mode, geomancer_1_geo_binding, geomancer_1_mode_binding];
+    }
+
+    class Example extends SvelteElement {
+    	constructor(options) {
+    		super();
+    		init(this, { target: this.shadowRoot }, instance$1, create_fragment$1, safe_not_equal, {});
+
+    		if (options) {
+    			if (options.target) {
+    				insert_dev(options.target, this, options.anchor);
+    			}
+    		}
+    	}
+    }
+
+    customElements.define("geomancer-example", Example);
+
+    var Example$1 = /*#__PURE__*/Object.freeze({
+        __proto__: null,
+        'default': Example
+    });
+
     var index = {
+      Example: Example$1,
       Geomancer: Geomancer$1,
       measure: measure$1,
       style: style$1,
-      tracer: tracer$2
+      tracer: tracer$2,
+      tome,
     };
 
     return index;
