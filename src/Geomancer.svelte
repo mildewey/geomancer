@@ -1,28 +1,12 @@
 <svelte:options tag="geomancer-scene"/>
 
-<script context="module">
-import { writable, derived, get } from 'svelte/store';
+<script>
+import { writable } from 'svelte/store';
 import { onMount } from 'svelte';
 
-import style from './style'
-import measure from './measure'
-import tracer from './tracer'
-import events from './events'
-import view from './view'
-import example from './example'
-import { v4 as uuidv4 } from 'uuid';
 import geomancer from './geomancer';
 import elemental from './elemental';
 
-
-export {
-	style,
-	measure,
-	tracer
-}
-</script>
-
-<script>
 export let geo = geomancer()
 export let mode = {
 	name: "default",

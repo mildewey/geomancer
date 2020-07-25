@@ -24,18 +24,6 @@ var app = (function () {
     function safe_not_equal(a, b) {
         return a != a ? b == b : a !== b || ((a && typeof a === 'object') || typeof a === 'function');
     }
-    function subscribe(store, ...callbacks) {
-        if (store == null) {
-            return noop;
-        }
-        const unsub = store.subscribe(...callbacks);
-        return unsub.unsubscribe ? () => unsub.unsubscribe() : unsub;
-    }
-    function get_store_value(store) {
-        let value;
-        subscribe(store, _ => value = _)();
-        return value;
-    }
     function insert(target, node, anchor) {
         target.insertBefore(node, anchor || null);
     }
@@ -331,263 +319,57 @@ var app = (function () {
         }
     }
 
-    function sorter (a, b) {
-      if (a.index < b.index) return -1
-      if (a.index > b.index) return 1
-      return 0
-    }
-
-    function tracer (init = []) { // init is filled with objects that have a min point, a max point, and a value
-      const tracer = {
-        x: [],
-        y: [],
-        checks: {}
-      };
-
-      return concat(tracer, init)
-    }
-
-    function insert$1 (tracer, {min, max, value, check}) {
-      tracer.checks[value] = check;
-      tracer.x.push({index: Math.floor(min.x), value});
-      tracer.x.push({index: Math.floor(max.x), value});
-      tracer.x.sort(sorter);
-
-      tracer.y.push({index: Math.floor(min.y), value});
-      tracer.y.push({index: Math.floor(max.y), value});
-      tracer.y.sort(sorter);
-    }
-
-    function concat (tracer, boxes) {
-      boxes.forEach(box => tracer.checks[box.value]=box.check);
-
-      tracer.x = boxes.map(({min, value}) => {
-        return {index: Math.floor(min.x), value}
-      }).concat(boxes.map(({max, value}) => {
-        return {index: Math.floor(max.x), value}
-      }));
-
-      tracer.y = boxes.map(({min, value}) => {
-        return {index: Math.floor(min.y), value}
-      }).concat(boxes.map(({max, value}) => {
-        return {index: Math.floor(max.y), value}
-      }));
-
-      tracer.x.sort(sorter);
-      tracer.y.sort(sorter);
-
-      return tracer
-    }
-
-    function intersectPoint (tracer, point) {
-      let active = new Set();
-      let x = Math.floor(point.x);
-      let y = Math.floor(point.y);
-
-      for (let i in tracer.x) {
-        let box = tracer.x[i];
-        if (box.index <= x) {
-          if (active.has(box.value)) {
-            active.delete(box.value);
-          } else {
-            active.add(box.value);
-          }
-        } else {
-          break
+    const subscriber_queue = [];
+    /**
+     * Create a `Writable` store that allows both updating and reading by subscription.
+     * @param {*=}value initial value
+     * @param {StartStopNotifier=}start start and stop notifications for subscriptions
+     */
+    function writable(value, start = noop) {
+        let stop;
+        const subscribers = [];
+        function set(new_value) {
+            if (safe_not_equal(value, new_value)) {
+                value = new_value;
+                if (stop) { // store is ready
+                    const run_queue = !subscriber_queue.length;
+                    for (let i = 0; i < subscribers.length; i += 1) {
+                        const s = subscribers[i];
+                        s[1]();
+                        subscriber_queue.push(s, value);
+                    }
+                    if (run_queue) {
+                        for (let i = 0; i < subscriber_queue.length; i += 2) {
+                            subscriber_queue[i][0](subscriber_queue[i + 1]);
+                        }
+                        subscriber_queue.length = 0;
+                    }
+                }
+            }
         }
-      }
-
-      let xintersects = [...active];
-      active = new Set();
-
-      for (let i in tracer.y) {
-        let box = tracer.y[i];
-        if (box.index <= y) {
-          if (active.has(box.value)) {
-            active.delete(box.value);
-          } else {
-            active.add(box.value);
-          }
-        } else {
-          break
+        function update(fn) {
+            set(fn(value));
         }
-      }
-
-      let possibles = [...xintersects].filter(val => active.has(val));
-      return possibles.filter(val => tracer.checks[val](point.x, point.y))
-    }
-
-    function intersectBox (tracer, {min, max}) {
-      let active = new Set();
-      let xmin = Math.floor(min.x);
-      let xmax = Math.floor(max.x);
-      let ymin = Math.floor(min.y);
-      let ymax = Math.floor(max.y);
-
-      for (let i in tracer.x) {
-        let box = tracer.x[i];
-        if (box.index <= xmin) {
-          if (active.has(box.value)) {
-            active.delete(box.value);
-          } else {
-            active.add(box.value);
-          }
-        } else if (box.index <= xmax) {
-          active.add(box.value);
-        } else {
-          break
+        function subscribe(run, invalidate = noop) {
+            const subscriber = [run, invalidate];
+            subscribers.push(subscriber);
+            if (subscribers.length === 1) {
+                stop = start(set) || noop;
+            }
+            run(value);
+            return () => {
+                const index = subscribers.indexOf(subscriber);
+                if (index !== -1) {
+                    subscribers.splice(index, 1);
+                }
+                if (subscribers.length === 0) {
+                    stop();
+                    stop = null;
+                }
+            };
         }
-      }
-
-      let xintersects = [...active];
-      active = new Set();
-
-      for (let i in tracer.y) {
-        let box = tracer.y[i];
-        if (box.index <= ymin) {
-          if (active.has(box.value)) {
-            active.delete(box.value);
-          } else {
-            active.add(box.value);
-          }
-        } else if (box.index <= ymax) {
-          active.add(box.value);
-        } else {
-          break
-        }
-      }
-
-      return [...xintersects].filter(val => active.has(val))
+        return { set, update, subscribe };
     }
-
-    function boxesIntersect(one, two) {
-      if (one.max.x < two.min.x) return false
-      if (two.max.x < one.min.x) return false
-      if (one.max.y < two.min.y) return false
-      if (two.max.y < two.max.y) return false
-      return true
-    }
-
-    function generateHitChecker$1(context, path, transform) {
-      return (x, y) => {
-        context.save();
-        context.setTransform(...transform);
-        const inPath = context.isPointInPath(path, x, y);
-        context.restore();
-        return inPath
-      }
-    }
-
-    var tracer$1 = {
-      tracer,
-      insert: insert$1,
-      concat,
-      intersectPoint,
-      intersectBox,
-      boxesIntersect,
-      generateHitChecker: generateHitChecker$1,
-    };
-
-    var tracer$2 = /*#__PURE__*/Object.freeze({
-        __proto__: null,
-        'default': tracer$1
-    });
-
-    const defaults = {
-      fillStyle: null,
-      strokeStyle: null,
-      lineWidth: 1,
-      lineCap: 'butt',
-      lineJoin: 'miter',
-      miterLimit: 10.0,
-      lineDash: [],
-      lineDashOffset: 0,
-      shadowOffsetX: 0,
-      shadowOffsetY: 0,
-      shadowBlur: 0,
-      shadowColor: 'transparent',
-      fill: 'nonzero',
-      font: 'sans-serif',
-      textAlign: 'start',
-      textBaseline: 'alphabetic',
-      direction: 'inherit'
-    };
-
-    function palletteToPainter(options) {
-      let pallette = {...defaults, ...options};
-      function painter(context, path) {
-        context.lineWidth = pallette.lineWidth;
-        context.lineCap = pallette.lineCap;
-        context.lineJoin = pallette.lineJoin;
-        context.miterLimit = pallette.miterLimit;
-        context.setLineDash(pallette.lineDash);
-        context.lineDashOffset = pallette.lineDashOffset;
-        context.font = pallette.font;
-        context.textAlign = pallette.textAlign;
-        context.textBaseline = pallette.textBaseline;
-        context.direction = pallette.direction;
-        context.shadowOffsetX = pallette.shadowOffsetX;
-        context.shadowOffsetY = pallette.shadowOffsetY;
-        context.shadowBlur = pallette.shadowBlur;
-        context.shadowColor = pallette.shadowColor;
-        context.fillStyle = pallette.fillStyle;
-        context.strokeStyle = pallette.strokeStyle;
-
-        if (path.text) {
-          if (pallette.fillStyle) context.fillText(path.text, path.x, path.y, path.maxWidth);
-          if (pallette.strokeStyle) context.strokeText(path.text, path.x, path.y, path.maxWidth);
-        } else {
-          if (pallette.fillStyle) context.fill(path);
-          if (pallette.strokeStyle) context.stroke(path);
-        }
-      }
-
-      return painter
-    }
-
-    function linearGradient(context, start, end, stops) {
-      let grad = context.createLinearGradient(start.x, start.y, end.x, end.y);
-      stops.forEach(({loc, color}) => grad.addColorStop(loc, color));
-
-      return grad
-    }
-
-    function radialGradient(context, start, end, stops) {
-      let grad = context.createRadialGradient(start.x, start.y, start.radius, end.x, end.y, end.radius);
-      stops.forEach(({loc, color}) => grad.addColorStop(loc, color));
-
-      return grad
-    }
-
-    function pattern(context, url, type) {
-      let img = new Image();
-      img.src(url);
-      let ptrn = context.createPattern(img, type);
-
-      return ptrn
-    }
-
-    function pallettesToPainters (pallettes) {
-      let painters = {};
-      for (let id in pallettes) {
-        let painter = palletteToPainter(pallettes[id]);
-        painters[id] = painter;
-      }
-      return painters
-    }
-
-    var style = {
-      linearGradient,
-      radialGradient,
-      pattern,
-      palletteToPainter,
-      pallettesToPainters
-    };
-
-    var style$1 = /*#__PURE__*/Object.freeze({
-        __proto__: null,
-        'default': style
-    });
 
     const validate = {
       moveTo: params => params.length === 2 ? 'moveTo must have 2 parameters' : null,
@@ -781,80 +563,324 @@ var app = (function () {
         'default': measure
     });
 
-    var events = {
-
-    };
-
-    function enforceBoundaries (geo) {
-      let zoom = geo.camera.transform[0];
-      const width = geo.camera.area.width;
-      const height = geo.camera.area.height;
-      const right = geo.camera.extents.max.x;
-      const left = geo.camera.extents.min.x;
-      const top = geo.camera.extents.min.y;
-      const bottom = geo.camera.extents.max.y;
-
-      if (zoom < minZoom(geo)) {
-        zoom = minZoom;
-      } else if (geo.camera.extents.max.zoom && zoom > geo.camera.extents.max.zoom) {
-        zoom = geo.camera.extents.max.zoom;
-      }
-
-      geo.camera.transform[0] = zoom;
-      geo.camera.transform[3] = zoom;
-
-      let x = geo.camera.transform[4];
-      let y = geo.camera.transform[5];
-      let maxX = -left;
-      let minX = width - right*zoom;
-      let maxY = -top;
-      let minY = height - bottom*zoom;
-
-      if (left !== null && x < minX) geo.camera.transform[4] = minX;
-      if (right !== null && x > maxX) geo.camera.transform[4] = maxX;
-      if (top !== null && y < minY) geo.camera.transform[5] = minY;
-      if (bottom !== null && y > maxY) geo.camera.transform[5] = maxY;
+    function sorter (a, b) {
+      if (a.index < b.index) return -1
+      if (a.index > b.index) return 1
+      return 0
     }
 
-    function minZoom(geo) {
-      const width = geo.camera.area.width;
-      const height = geo.camera.area.height;
-      const right = geo.camera.extents.max.x;
-      const left = geo.camera.extents.min.x;
-      const top = geo.camera.extents.min.y;
-      const bottom = geo.camera.extents.max.y;
+    function tracer (init = []) { // init is filled with objects that have a min point, a max point, and a value
+      const tracer = {
+        x: [],
+        y: [],
+        checks: {}
+      };
 
-      const possibleMinZoom = [geo.camera.extents.min.zoom];
-      if (right !== null && left !== null) possibleMinZoom.push(width/(right-left));
-      if (top !== null && bottom !== null) possibleMinZoom.push(height/(bottom-top));
+      return concat(tracer, init)
+    }
+
+    function insert$1 (tracer, {min, max, value, check}) {
+      tracer.checks[value] = check;
+      tracer.x.push({index: Math.floor(min.x), value});
+      tracer.x.push({index: Math.floor(max.x), value});
+      tracer.x.sort(sorter);
+
+      tracer.y.push({index: Math.floor(min.y), value});
+      tracer.y.push({index: Math.floor(max.y), value});
+      tracer.y.sort(sorter);
+    }
+
+    function concat (tracer, boxes) {
+      boxes.forEach(box => tracer.checks[box.value]=box.check);
+
+      tracer.x = boxes.map(({min, value}) => {
+        return {index: Math.floor(min.x), value}
+      }).concat(boxes.map(({max, value}) => {
+        return {index: Math.floor(max.x), value}
+      }));
+
+      tracer.y = boxes.map(({min, value}) => {
+        return {index: Math.floor(min.y), value}
+      }).concat(boxes.map(({max, value}) => {
+        return {index: Math.floor(max.y), value}
+      }));
+
+      tracer.x.sort(sorter);
+      tracer.y.sort(sorter);
+
+      return tracer
+    }
+
+    function intersectPoint (tracer, point) {
+      let active = new Set();
+      let x = Math.floor(point.x);
+      let y = Math.floor(point.y);
+
+      for (let i in tracer.x) {
+        let box = tracer.x[i];
+        if (box.index <= x) {
+          if (active.has(box.value)) {
+            active.delete(box.value);
+          } else {
+            active.add(box.value);
+          }
+        } else {
+          break
+        }
+      }
+
+      let xintersects = [...active];
+      active = new Set();
+
+      for (let i in tracer.y) {
+        let box = tracer.y[i];
+        if (box.index <= y) {
+          if (active.has(box.value)) {
+            active.delete(box.value);
+          } else {
+            active.add(box.value);
+          }
+        } else {
+          break
+        }
+      }
+
+      let possibles = [...xintersects].filter(val => active.has(val));
+      return possibles.filter(val => tracer.checks[val](point.x, point.y))
+    }
+
+    function intersectBox (tracer, {min, max}) {
+      let active = new Set();
+      let xmin = Math.floor(min.x);
+      let xmax = Math.floor(max.x);
+      let ymin = Math.floor(min.y);
+      let ymax = Math.floor(max.y);
+
+      for (let i in tracer.x) {
+        let box = tracer.x[i];
+        if (box.index <= xmin) {
+          if (active.has(box.value)) {
+            active.delete(box.value);
+          } else {
+            active.add(box.value);
+          }
+        } else if (box.index <= xmax) {
+          active.add(box.value);
+        } else {
+          break
+        }
+      }
+
+      let xintersects = [...active];
+      active = new Set();
+
+      for (let i in tracer.y) {
+        let box = tracer.y[i];
+        if (box.index <= ymin) {
+          if (active.has(box.value)) {
+            active.delete(box.value);
+          } else {
+            active.add(box.value);
+          }
+        } else if (box.index <= ymax) {
+          active.add(box.value);
+        } else {
+          break
+        }
+      }
+
+      return [...xintersects].filter(val => active.has(val))
+    }
+
+    function boxesIntersect(one, two) {
+      if (one.max.x < two.min.x) return false
+      if (two.max.x < one.min.x) return false
+      if (one.max.y < two.min.y) return false
+      if (two.max.y < two.max.y) return false
+      return true
+    }
+
+    function generateHitChecker(context, path, transform) {
+      return (x, y) => {
+        context.save();
+        context.setTransform(...transform);
+        const inPath = context.isPointInPath(path, x, y);
+        context.restore();
+        return inPath
+      }
+    }
+
+    var tracer$1 = {
+      tracer,
+      insert: insert$1,
+      concat,
+      intersectPoint,
+      intersectBox,
+      boxesIntersect,
+      generateHitChecker,
+    };
+
+    var tracer$2 = /*#__PURE__*/Object.freeze({
+        __proto__: null,
+        'default': tracer$1
+    });
+
+    const defaults = {
+      fillStyle: null,
+      strokeStyle: null,
+      lineWidth: 1,
+      lineCap: 'butt',
+      lineJoin: 'miter',
+      miterLimit: 10.0,
+      lineDash: [],
+      lineDashOffset: 0,
+      shadowOffsetX: 0,
+      shadowOffsetY: 0,
+      shadowBlur: 0,
+      shadowColor: 'transparent',
+      fill: 'nonzero',
+      font: 'sans-serif',
+      textAlign: 'start',
+      textBaseline: 'alphabetic',
+      direction: 'inherit'
+    };
+
+    function palletteToPainter(options) {
+      let pallette = {...defaults, ...options};
+      function painter(context, path) {
+        context.lineWidth = pallette.lineWidth;
+        context.lineCap = pallette.lineCap;
+        context.lineJoin = pallette.lineJoin;
+        context.miterLimit = pallette.miterLimit;
+        context.setLineDash(pallette.lineDash);
+        context.lineDashOffset = pallette.lineDashOffset;
+        context.font = pallette.font;
+        context.textAlign = pallette.textAlign;
+        context.textBaseline = pallette.textBaseline;
+        context.direction = pallette.direction;
+        context.shadowOffsetX = pallette.shadowOffsetX;
+        context.shadowOffsetY = pallette.shadowOffsetY;
+        context.shadowBlur = pallette.shadowBlur;
+        context.shadowColor = pallette.shadowColor;
+        context.fillStyle = pallette.fillStyle;
+        context.strokeStyle = pallette.strokeStyle;
+
+        if (path.text) {
+          if (pallette.fillStyle) context.fillText(path.text, path.x, path.y, path.maxWidth);
+          if (pallette.strokeStyle) context.strokeText(path.text, path.x, path.y, path.maxWidth);
+        } else {
+          if (pallette.fillStyle) context.fill(path);
+          if (pallette.strokeStyle) context.stroke(path);
+        }
+      }
+
+      return painter
+    }
+
+    function linearGradient(context, start, end, stops) {
+      let grad = context.createLinearGradient(start.x, start.y, end.x, end.y);
+      stops.forEach(({loc, color}) => grad.addColorStop(loc, color));
+
+      return grad
+    }
+
+    function radialGradient(context, start, end, stops) {
+      let grad = context.createRadialGradient(start.x, start.y, start.radius, end.x, end.y, end.radius);
+      stops.forEach(({loc, color}) => grad.addColorStop(loc, color));
+
+      return grad
+    }
+
+    function pattern(context, url, type) {
+      let img = new Image();
+      img.src(url);
+      let ptrn = context.createPattern(img, type);
+
+      return ptrn
+    }
+
+    function pallettesToPainters (pallettes) {
+      let painters = {};
+      for (let id in pallettes) {
+        let painter = palletteToPainter(pallettes[id]);
+        painters[id] = painter;
+      }
+      return painters
+    }
+
+    var style = {
+      linearGradient,
+      radialGradient,
+      pattern,
+      palletteToPainter,
+      pallettesToPainters
+    };
+
+    var style$1 = /*#__PURE__*/Object.freeze({
+        __proto__: null,
+        'default': style
+    });
+
+    function minZoom({extents, area}) {
+      const possibleMinZoom = [extents.min.zoom];
+      if (extents.max.x !== null && extents.min.x !== null) possibleMinZoom.push(area.width/(extents.max.x-extents.min.x));
+      if (extents.min.y !== null && extents.max.y !== null) possibleMinZoom.push(area.height/(extents.max.y-extents.min.y));
       const minZoom = Math.max(...possibleMinZoom);
 
       return minZoom
     }
 
-    function mouseZoom (mouse, geo, speed=1.2) {
-      let zoom = geo.camera.transform[0] * (speed ** -Math.sign(mouse.deltaY));
-      zoom = zoom > geo.camera.extents.max.zoom ? geo.camera.extents.max.zoom : zoom;
-      const min = minZoom(geo);
-      zoom = zoom < min ? min : zoom;
-      if (zoom !== geo.camera.transform) {
-        let factor = zoom / geo.camera.transform[0];
-        let x = mouse.clientX;
-        let y = mouse.clientY;
-        geo.camera.transform[4] = x - factor * (x-geo.camera.transform[4]);
-        geo.camera.transform[5] = y - factor * (y-geo.camera.transform[5]);
-        geo.camera.transform[0] = zoom;
-        geo.camera.transform[3] = zoom;
-        enforceBoundaries(geo);
-      }
+    function enforceExtents ({area, extents, transform}) {
+      let maxX = -extents.min.x;
+      let minX = area.width - extents.max.x*transform[0];
+      let maxY = -extents.min.y;
+      let minY = area.height - extents.max.y*transform[3];
 
-      mouse.preventDefault();
-      mouse.stopPropagation();
+      if (extents.min.x !== null && transform[4] < minX) transform[4] = minX;
+      if (extents.max.x !== null && transform[4] > maxX) transform[4] = maxX;
+      if (extents.min.y !== null && transform[5] < minY) transform[5] = minY;
+      if (extents.max.y !== null && transform[5] > maxY) transform[5] = maxY;
+    }
+
+    function zoom ({transform}, zoom, x=null, y=null) {
+      x = x === null ? transform[4] + (area.width / (2 * transform[0])) : x;
+      y = y === null ? transform[5] + (area.height / (2 * transform[3])) : y;
+      transform[4] = x - zoom * (x-transform[4]) / transform[0];
+      transform[5] = y - zoom * (y-transform[5]) / transform[3];
+      transform[0] = zoom;
+      transform[3] = zoom;
     }
 
     var view = {
-      enforceBoundaries,
-      mouseZoom
+      mouse: {
+        zoom: (mouse, camera, speed=1.2) => {
+          let factor = camera.transform[0] * (speed ** -Math.sign(mouse.deltaY));
+
+          factor = factor > camera.extents.max.zoom ? camera.extents.max.zoom : factor;
+          const min = minZoom(camera);
+
+          factor = factor < min ? min : factor;
+
+          zoom(camera, factor, mouse.clientX, mouse.clientY);
+          enforceExtents(camera);
+
+          mouse.preventDefault();
+          mouse.stopPropagation();
+        },
+        pan: (mouse, camera) => {
+          let lastX = mouse.clientX;
+          let lastY = mouse.clientY;
+
+          return (mouse) => {
+            camera.transform[4] = camera.transform[4] + mouse.clientX - lastX;
+            camera.transform[5] = camera.transform[5] + mouse.clientY - lastY;
+            lastX = mouse.clientX;
+            lastY = mouse.clientY;
+            enforceExtents(camera);
+          }
+        }
+      }
+
     };
 
     const shapes = {};
@@ -874,14 +900,14 @@ var app = (function () {
       };
     }
 
-    renderer("simple", (context, {shape, style, trace}, {viewport, hitChecker, tome}) => {
+    renderer("simple", (context, {shape, style, trace}, {viewport, handles, tome}) => {
       const t = context.getTransform();
       const transform = [t.a, t.b, t.c, t.d, t.e, t.f];
       const {box, path} = tome.shape(shape);
       const finalBox = measure.transformBox(box, transform);
       if (tracer$1.boxesIntersect(viewport, finalBox)) {
         if (trace) {
-          tracer$1.insert(hitChecker, {...finalBox, value: trace, check: tracer$1.generateHitChecker(context, path.shape, transform)});
+          tracer$1.insert(handles, {...finalBox, value: trace, check: tracer$1.generateHitChecker(context, path.shape, transform)});
         }
         tome.style(style).painter(context, path);
       }
@@ -917,16 +943,13 @@ var app = (function () {
       {
         mousedown: (mouse, {geo, elem}) => {
           elem.set("panning", {
-            x: mouse.clientX,
-            y: mouse.clientY,
+            mouse,
             geo,
-            elem,
-            previousMode: "default",
-            previousState: { geo, elem }
+            end: () => {elem.set("default", {geo, elem});}
           });
         },
         wheel: (mouse, {geo}) => {
-          view.mouseZoom(mouse, geo);
+          view.mouse.zoom(mouse, geo.camera);
         }
       },
       (state) => state
@@ -935,28 +958,14 @@ var app = (function () {
     mode(
       "panning",
       {
-      	mouseup: (mouse, { elem, previousMode, previousState }) => { elem.set(previousMode, previousState); },
-      	mouseout: (mouse, { elem, previousMode, previousState }) => { elem.set(previousMode, previousState); },
-        mouseenter: (mouse, state) => {
-          state.lastX = mouse.clientX;
-          state.lastY = mouse.clientY;
-        },
-      	mousemove: (mouse, state) => {
-          state.geo.camera.transform[4] = state.geo.camera.transform[4] + mouse.clientX - state.lastX;
-          state.geo.camera.transform[5] = state.geo.camera.transform[5] + mouse.clientY - state.lastY;
-          state.lastX = mouse.clientX;
-          state.lastY = mouse.clientY;
-          view.enforceBoundaries(state.geo);
-        },
+      	mouseup: (mouse, { end }) => { end(); },
+      	mouseout: (mouse, { end }) => { end(); },
+      	mousemove: (mouse, { pan }) => { pan(mouse); },
       },
-      ({x, y, geo, elem, previousMode, previousState}) => {
+      ({mouse, geo, end}) => {
         return {
-          lastX: x,
-          lastY: y,
-          geo,
-          elem,
-          previousMode,
-          previousState
+          pan: view.mouse.pan(mouse, geo.camera),
+          end
         }
       }
     );
@@ -1050,7 +1059,8 @@ var app = (function () {
           }
         },
         scene: [],
-        tome
+        tome,
+        handles: tracer$1.tracer()
       };
 
       geomancer.render = (context) => {
@@ -1064,580 +1074,16 @@ var app = (function () {
           },
           geomancer.camera.transform
         );
-        const hitChecker = tracer$1.tracer();
+        geomancer.handles = tracer$1.tracer();
         geomancer.scene.forEach(sub => {
           const subject = tome.subject(sub);
           const render = tome.renderer(subject.renderer);
-          if (render) render(context, subject, {viewport, hitChecker, tome});
+          if (render) render(context, subject, {viewport, handles: geomancer.handles, tome});
         });
       };
 
       return geomancer
     }
-
-    // Unique ID creation requires a high quality random # generator. In the browser we therefore
-    // require the crypto API and do not support built-in fallback to lower quality random number
-    // generators (like Math.random()).
-    // getRandomValues needs to be invoked in a context where "this" is a Crypto implementation. Also,
-    // find the complete implementation of crypto (msCrypto) on IE11.
-    var getRandomValues = typeof crypto !== 'undefined' && crypto.getRandomValues && crypto.getRandomValues.bind(crypto) || typeof msCrypto !== 'undefined' && typeof msCrypto.getRandomValues === 'function' && msCrypto.getRandomValues.bind(msCrypto);
-    var rnds8 = new Uint8Array(16);
-    function rng() {
-      if (!getRandomValues) {
-        throw new Error('crypto.getRandomValues() not supported. See https://github.com/uuidjs/uuid#getrandomvalues-not-supported');
-      }
-
-      return getRandomValues(rnds8);
-    }
-
-    /**
-     * Convert array of 16 byte values to UUID string format of the form:
-     * XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
-     */
-    var byteToHex = [];
-
-    for (var i = 0; i < 256; ++i) {
-      byteToHex.push((i + 0x100).toString(16).substr(1));
-    }
-
-    function bytesToUuid(buf, offset_) {
-      var offset = offset_ || 0; // Note: Be careful editing this code!  It's been tuned for performance
-      // and works in ways you may not expect. See https://github.com/uuidjs/uuid/pull/434
-
-      return (byteToHex[buf[offset + 0]] + byteToHex[buf[offset + 1]] + byteToHex[buf[offset + 2]] + byteToHex[buf[offset + 3]] + '-' + byteToHex[buf[offset + 4]] + byteToHex[buf[offset + 5]] + '-' + byteToHex[buf[offset + 6]] + byteToHex[buf[offset + 7]] + '-' + byteToHex[buf[offset + 8]] + byteToHex[buf[offset + 9]] + '-' + byteToHex[buf[offset + 10]] + byteToHex[buf[offset + 11]] + byteToHex[buf[offset + 12]] + byteToHex[buf[offset + 13]] + byteToHex[buf[offset + 14]] + byteToHex[buf[offset + 15]]).toLowerCase();
-    }
-
-    function v4(options, buf, offset) {
-      options = options || {};
-      var rnds = options.random || (options.rng || rng)(); // Per 4.4, set bits for version and `clock_seq_hi_and_reserved`
-
-      rnds[6] = rnds[6] & 0x0f | 0x40;
-      rnds[8] = rnds[8] & 0x3f | 0x80; // Copy bytes to buffer, if provided
-
-      if (buf) {
-        offset = offset || 0;
-
-        for (var i = 0; i < 16; ++i) {
-          buf[offset + i] = rnds[i];
-        }
-
-        return buf;
-      }
-
-      return bytesToUuid(rnds);
-    }
-
-    const subscriber_queue = [];
-    /**
-     * Creates a `Readable` store that allows reading by subscription.
-     * @param value initial value
-     * @param {StartStopNotifier}start start and stop notifications for subscriptions
-     */
-    function readable(value, start) {
-        return {
-            subscribe: writable(value, start).subscribe,
-        };
-    }
-    /**
-     * Create a `Writable` store that allows both updating and reading by subscription.
-     * @param {*=}value initial value
-     * @param {StartStopNotifier=}start start and stop notifications for subscriptions
-     */
-    function writable(value, start = noop) {
-        let stop;
-        const subscribers = [];
-        function set(new_value) {
-            if (safe_not_equal(value, new_value)) {
-                value = new_value;
-                if (stop) { // store is ready
-                    const run_queue = !subscriber_queue.length;
-                    for (let i = 0; i < subscribers.length; i += 1) {
-                        const s = subscribers[i];
-                        s[1]();
-                        subscriber_queue.push(s, value);
-                    }
-                    if (run_queue) {
-                        for (let i = 0; i < subscriber_queue.length; i += 2) {
-                            subscriber_queue[i][0](subscriber_queue[i + 1]);
-                        }
-                        subscriber_queue.length = 0;
-                    }
-                }
-            }
-        }
-        function update(fn) {
-            set(fn(value));
-        }
-        function subscribe(run, invalidate = noop) {
-            const subscriber = [run, invalidate];
-            subscribers.push(subscriber);
-            if (subscribers.length === 1) {
-                stop = start(set) || noop;
-            }
-            run(value);
-            return () => {
-                const index = subscribers.indexOf(subscriber);
-                if (index !== -1) {
-                    subscribers.splice(index, 1);
-                }
-                if (subscribers.length === 0) {
-                    stop();
-                    stop = null;
-                }
-            };
-        }
-        return { set, update, subscribe };
-    }
-    function derived(stores, fn, initial_value) {
-        const single = !Array.isArray(stores);
-        const stores_array = single
-            ? [stores]
-            : stores;
-        const auto = fn.length < 2;
-        return readable(initial_value, (set) => {
-            let inited = false;
-            const values = [];
-            let pending = 0;
-            let cleanup = noop;
-            const sync = () => {
-                if (pending) {
-                    return;
-                }
-                cleanup();
-                const result = fn(single ? values[0] : values, set);
-                if (auto) {
-                    set(result);
-                }
-                else {
-                    cleanup = is_function(result) ? result : noop;
-                }
-            };
-            const unsubscribers = stores_array.map((store, i) => subscribe(store, (value) => {
-                values[i] = value;
-                pending &= ~(1 << i);
-                if (inited) {
-                    sync();
-                }
-            }, () => {
-                pending |= (1 << i);
-            }));
-            inited = true;
-            sync();
-            return function stop() {
-                run_all(unsubscribers);
-                cleanup();
-            };
-        });
-    }
-
-    function path(instructions) {
-      const pathStore = writable(instructions);
-      let shapeStore = derived(pathStore, instructions =>({
-        shape: measure.pathToCanvas(instructions),
-        box: measure.pathToBox(instructions),
-        instructions: instructions
-      }));
-
-      return {
-        set: newInstructions => pathStore.set(newInstructions),
-        subscribe: callback => shapeStore.subscribe(callback)
-      }
-    }
-
-    function pallette(styling) {
-      const palletteStore = writable(styling);
-      let painterStore = derived(palletteStore, styling => ({
-        draw: style.palletteToPainter(styling),
-        styling
-      }));
-
-      return {
-        set: newStyle => palletteStore.set(newStyle),
-        subscribe: callback => painterStore.subscribe(callback)
-      }
-    }
-
-    function resetStore(store, subscribers) {
-      subscribers.forEach(sub => {
-        sub.unsubscribe = store.subscribe(sub.callback);
-      });
-      return store
-    }
-
-    function subscription(store, subscribers, callback) {
-      const index = v4();
-      const unsubscribe = store.subscribe(callback);
-      subscribers[index] = {callback, unsubscribe};
-
-      return () => {
-        subscribers[index].unsubscribe();
-        delete subscribers[index];
-      }
-    }
-
-    function pattern$1(path, pallette) {
-      function reaction([path, pallette]) {
-        return {
-          draw: context => pallette.draw(context, path.shape),
-          path,
-          pallette
-        }
-      }
-
-      let store = derived([path, pallette], reaction);
-      const subscribers = {};
-
-      return {
-        set: (newPath, newPallette) => {
-          path = newPath;
-          pallette = newPallette;
-          store = resetStore(derived([path, pallette], reaction), subscribers);
-        },
-        setPath: (newPath) => {
-          path = newPath;
-          store = resetStore(derived([path, pallette], reaction), subscribers);
-        },
-        setPallette: (newPallette) => {
-          pallette = newPallette;
-          store = resetStore(derived([path, pallette], reaction), subscribers);
-        },
-        subscribe: (callback) => {
-          return subscription(store, subscribers, callback)
-        }
-      }
-    }
-
-    function subject(pattern, transform, visible, trace=null) {
-      const transformStore = writable(transform);
-      const visibleStore = writable(visible);
-
-      function reaction([pattern, transform, visible]) {
-        return {
-          draw: (context, viewport, hull) => {
-            context.save();
-            context.transform(...transform);
-            const t = context.getTransform();
-            const currentTransform = [t.a, t.b, t.c, t.d, t.e, t.f];
-            const subjectBox = measure.transformBox(pattern.path.box, currentTransform);
-            if (trace) {
-              tracer$1.insert(hull, {...subjectBox, value: trace, check: tracer$1.generateHitChecker(context, pattern.path.shape, currentTransform)});
-            }
-            if (visible && tracer$1.boxesIntersect(viewport, subjectBox)) {
-              pattern.draw(context);
-              context.restore();
-            }
-          },
-          pattern,
-          transform,
-          visible
-        }
-      }
-
-      let store = derived([pattern, transformStore, visibleStore], reaction);
-      const subscribers = {};
-
-      return {
-        set: (newPattern, newTransform, newVisible) => {
-          subscribers.forEach(sub => {sub.unsubscribe();});
-          const newStore = derived([newPattern, transformStore, visibleStore], reaction);
-          transformStore.set(newTransform);
-          visibleStore.set(newVisible);
-          store = resetStore(newStore, subscribers);
-        },
-        setTransform: (newTransform) => {
-          transformStore.set(newTransform);
-        },
-        setVisible: (newVisible) => {
-          visibleStore.set(newVisible);
-        },
-        setPattern: (newPattern) => {
-          subscribers.forEach(sub => {sub.unsubscribe();});
-          store = resetStore(derived([newPattern, transformStore, visibleStore], reaction));
-        },
-        subscribe: (callback) => {
-          return subscription(store, subscribers, callback)
-        }
-      }
-    }
-
-    function frame(subjects, transform, visible) {
-      const transformStore = writable(transform);
-      const visibleStore = writable(visible);
-
-      function reaction([transform, visible, ...subjects]) {
-        return {
-          draw: (context, viewport, hull) => {
-            if (visible) {
-              context.save();
-              context.transform(...transform);
-              subjects.forEach(subject => subject.draw(context, viewport, hull));
-              context.restore();
-            }
-          },
-          transform,
-          visible,
-          subjects
-        }
-      }
-
-      let store = derived([transformStore, visibleStore, ...subjects], reaction);
-      const subscribers = {};
-
-      return {
-        set: (newSubjects, newTransform, newVisible) => {
-          subscribers.forEach(sub => {sub.unsubscribe();});
-          const newStore = derived([transformStore, visibleStore, ...newSubjects], reaction);
-          transformStore.set(newTransform);
-          visibleStore.set(newVisible);
-          store = resetStore(newStore, subscribers);
-        },
-        setTransform: (newTransform) => {
-          transformStore.set(newTransform);
-        },
-        setVisible: (newVisible) => {
-          visibleStore.set(newVisible);
-        },
-        setSubjects: (newSubjects) => {
-          subscribers.forEach(sub => {sub.unsubscribe();});
-          const newStore = derived([transformStore, visibleStore, ...newSubjects], reaction);
-          store = resetStore(newStore, subscribers);
-        },
-        subscribe: (callback) => {
-          return subscription(store, subscribers, callback)
-        }
-      }
-    }
-
-    function camera(subjects, transform, width, height) {
-      const transformStore = writable(transform);
-      const widthStore = writable(width);
-      const heightStore = writable(height);
-      let hull = tracer$1.tracer();
-
-      function reaction([transform, width, height, ...subjects]) {
-        const viewport = measure.transformBox({min: {x: 0, y: 0}, max: {x: width, y: height}}, transform);
-        return {
-          draw: (context) => {
-            context.setTransform(...transform);
-            context.save();
-            hull = tracer$1.tracer();
-            subjects.forEach(subject => subject.draw(context, viewport, hull));
-            context.restore();
-            return hull
-          },
-          transform,
-          width,
-          height,
-          subjects,
-          itemsAt: (x, y) => {
-            return tracer$1.intersectPoint(hull, {x, y})
-          }
-        }
-      }
-
-      let store = derived([transformStore, widthStore, heightStore, ...subjects], reaction);
-      const subscribers = {};
-
-      return {
-        set: (newLayers, newTransform, newWidth, newHeight) => {
-          subscribers.forEach(sub => {sub.unsubscribe();});
-          const newStore = derived([transformStore, widthStore, heightStore, ...newSubjects], reaction);
-          widthStore.set(newWidth);
-          heightStore.set(newHeight);
-          transformStore.set(newTransform);
-          store = resetStore(newStore, subscribers);
-        },
-        setTransform: (newTransform) => {
-          transformStore.set(newTransform);
-        },
-        setWidth: (newWidth) => {
-          widthStore.set(newWidth);
-        },
-        setHeight: (newHeight) => {
-          heightStore.set(newHeight);
-        },
-        setSubjects: (newSubjects) => {
-          subscribers.forEach(sub => {sub.unsubscribe();});
-          const newStore = derived([transformStore, widthStore, heightStore, ...newSubjects], reaction);
-          store = resetStore(newStore, subscribers);
-        },
-        subscribe: (callback) => {
-          return subscription(store, subscribers, callback)
-        },
-      }
-    }
-
-    const hexPath = path([
-      ['moveTo', 2.5, 43.3],
-      ['lineTo', 26.25, 84.77],
-      ['lineTo', 73.75, 84.77],
-      ['lineTo', 97.5, 43.3],
-      ['lineTo', 73.75, 2.165],
-      ['lineTo', 26.25, 2.165],
-      ['closePath'],
-    ]);
-    const boundingPath = path([['rect', 10, 10, 780, 780]]);
-    const blackPallette = pallette({
-      fillStyle: 'black',
-      lineWidth: 3,
-      lineJoin: 'round'
-    });
-    const thinBlackPallette = pallette({
-      lineWidth: 5,
-      strokeStyle: 'black',
-      lineJoin: 'round'
-    });
-    const hexPattern = pattern$1(hexPath, blackPallette);
-    const boundaryPattern = pattern$1(boundingPath, thinBlackPallette);
-    const boundarySubject = subject(boundaryPattern, [1, 0, 0, 1, 0, 0], true, "boundaries");
-    const hexSubject = subject(hexPattern, [1, 0, 0, 1, 100, 100], true, "lone hexagon");
-    const baseLayer = frame([boundarySubject, hexSubject], [1, 0, 0, 1, 0, 0], true);
-    const geomancer$1 = camera([baseLayer], [1, 0, 0, 1, 0, 0], 800, 800);
-
-    let extents = {left: 0, right: 800, top: 0, bottom: 800};
-    let maxZoom = 5;
-    const handlers = {
-    	mousedown: (mouse, {camera, id}) => {
-        view.startPanning(mouse.clientX, mouse.clientY, id);
-      },
-    	mouseup: (mouse, {camera, id}) => { view.stopPanning(id); },
-    	mouseout: (mouse, {camera, id}) => { view.stopPanning(id); },
-    	mousemove: (mouse, {camera, id}) => {
-        let state = get_store_value(camera);
-        console.log(state.itemsAt(mouse.clientX, mouse.clientY));
-
-        let target = view.panning(mouse.clientX, mouse.clientY, state.transform, id);
-        view.enforceBoundaries(state.width, state.height, target, extents);
-        camera.setTransform(target);
-      },
-    	wheel: (mouse, {camera}) => {
-        let state = get_store_value(camera);
-        let target = view.mouseZoom(mouse, state.transform);
-        view.enforceBoundaries(state.width, state.height, target, extents, maxZoom);
-
-        camera.setTransform(target);
-      },
-    };
-
-    var example = {
-      camera: geomancer$1,
-      handlers
-    };
-
-    function order (layer, subjects = []) {
-      layer.subjects.forEach(subject => {
-    		subjects.push(subject.id);
-      });
-
-      layer.layers.forEach(subLayer => {
-        order(subLayer, subjects);
-      });
-
-      return subjects
-    }
-
-
-    function resolve (transform, layer, subjects = {}) {
-      const layerTransform = measure.applyTransform(transform, layer.transform);
-
-      layer.subjects.forEach(subject => {
-    		let subjectTransform = measure.applyTransform(layerTransform, subject.transform);
-    		subjects[subject.id] = {
-          ...subject,
-          transform: subjectTransform
-        };
-      });
-
-      layer.layers.forEach(subLayer => {
-        resolve(reference, layerTransform, subLayer);
-      });
-
-      return subjects
-    }
-
-
-    var subjects$1 = {
-      order,
-      resolve
-    };
-
-    function makeHull(context, course, id) {
-      const subject = course.subjects[id];
-      if (subject.handle) {
-        context.save();
-        context.transform(...subject.transform);
-
-        const matrix = context.getTransform();
-        const transform = [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f];
-
-        const shape = course.shapes[subject.path];
-        const check = generateHitChecker(context, shape, transform);
-        const box = course.boxes[subject.path];
-
-        context.restore();
-        return {
-          ...measure.transformBox(box, transform),
-          value: id,
-          check
-        }
-      }
-
-    }
-
-    function hulls(context, course, scene, hitChecker=tracer$1.tracer()) {
-      context.save();
-
-      context.transform(...scene.transform);
-
-      scene.subjects.forEach(id => {
-        const hull = makeHull(context, course, id);
-        if (hull) {
-          tracer$1.insert(hitChecker, hull);
-        }
-      });
-
-      scene.layers.forEach(layer => {
-        hulls(context, course, layer, hitChecker);
-      });
-
-      context.restore();
-
-      return hitChecker
-    }
-
-    var handles = {
-      hulls
-    };
-
-    function paintSubject (context, course, subject) {
-      context.save();
-      context.transform(...subject.transform);
-
-      let shape = course.shapes[subject.path];
-      let painter = course.painters[subject.pallette];
-
-      painter(context, shape);
-      context.restore();
-    }
-
-    function paint (context, course, scene) {
-      context.transform(...scene.transform);
-
-      scene.subjects.forEach(id => {
-        let subject = course.subjects[id];
-        paintSubject(context, course, subject);
-      });
-
-      scene.layers.forEach(layer => {
-        context.save();
-        paint(context, course, layer);
-        context.restore();
-      });
-    }
-
-    var scene = {
-      paint
-    };
 
     /* src/Geomancer.svelte generated by Svelte v3.20.1 */
     const file = "src/Geomancer.svelte";
@@ -1653,7 +1099,7 @@ var app = (function () {
     			this.c = noop;
     			attr_dev(canvas_1, "width", canvas_1_width_value = "" + (/*geo*/ ctx[0].camera.area.width + "px"));
     			attr_dev(canvas_1, "height", canvas_1_height_value = "" + (/*geo*/ ctx[0].camera.area.height + "px"));
-    			add_location(canvas_1, file, 60, 0, 1166);
+    			add_location(canvas_1, file, 40, 0, 760);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -1741,19 +1187,7 @@ var app = (function () {
 
     	$$self.$capture_state = () => ({
     		writable,
-    		derived,
-    		get: get_store_value,
     		onMount,
-    		style,
-    		scene,
-    		measure,
-    		tracer: tracer$1,
-    		events,
-    		handles,
-    		view,
-    		subjects: subjects$1,
-    		example,
-    		uuidv4: v4,
     		geomancer,
     		elemental,
     		geo,
@@ -1829,11 +1263,7 @@ var app = (function () {
 
     var Geomancer$1 = /*#__PURE__*/Object.freeze({
         __proto__: null,
-        'default': Geomancer,
-        style: style,
-        scene: scene,
-        measure: measure,
-        tracer: tracer$1
+        'default': Geomancer
     });
 
     /* src/Example.svelte generated by Svelte v3.20.1 */

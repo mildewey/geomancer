@@ -63,16 +63,13 @@ mode(
   {
     mousedown: (mouse, {geo, elem}) => {
       elem.set("panning", {
-        x: mouse.clientX,
-        y: mouse.clientY,
+        mouse,
         geo,
-        elem,
-        previousMode: "default",
-        previousState: { geo, elem }
+        end: () => {elem.set("default", {geo, elem})}
       })
     },
     wheel: (mouse, {geo}) => {
-      view.mouseZoom(mouse, geo)
+      view.mouse.zoom(mouse, geo.camera)
     }
   },
   (state) => state
@@ -81,28 +78,14 @@ mode(
 mode(
   "panning",
   {
-  	mouseup: (mouse, { elem, previousMode, previousState }) => { elem.set(previousMode, previousState) },
-  	mouseout: (mouse, { elem, previousMode, previousState }) => { elem.set(previousMode, previousState) },
-    mouseenter: (mouse, state) => {
-      state.lastX = mouse.clientX
-      state.lastY = mouse.clientY
-    },
-  	mousemove: (mouse, state) => {
-      state.geo.camera.transform[4] = state.geo.camera.transform[4] + mouse.clientX - state.lastX
-      state.geo.camera.transform[5] = state.geo.camera.transform[5] + mouse.clientY - state.lastY
-      state.lastX = mouse.clientX
-      state.lastY = mouse.clientY
-      state.geo.enforceExtents()
-    },
+  	mouseup: (mouse, { end }) => { end() },
+  	mouseout: (mouse, { end }) => { end() },
+  	mousemove: (mouse, { pan }) => { pan(mouse) },
   },
-  ({x, y, geo, elem, previousMode, previousState}) => {
+  ({mouse, geo, end}) => {
     return {
-      lastX: x,
-      lastY: y,
-      geo,
-      elem,
-      previousMode,
-      previousState
+      pan: view.mouse.pan(mouse, geo.camera),
+      end
     }
   }
 )

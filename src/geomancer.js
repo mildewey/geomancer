@@ -41,26 +41,5 @@ export default function () {
     })
   }
 
-  geomancer.enforceExtents = () => {
-    const width = geomancer.camera.area.width
-    const height = geomancer.camera.area.height
-    const right = geomancer.camera.extents.max.x
-    const left = geomancer.camera.extents.min.x
-    const top = geomancer.camera.extents.min.y
-    const bottom = geomancer.camera.extents.max.y
-
-    let x = geomancer.camera.transform[4]
-    let y = geomancer.camera.transform[5]
-    let maxX = -left
-    let minX = width - right*geomancer.camera.transform[0]
-    let maxY = -top
-    let minY = height - bottom*geomancer.camera.transform[3]
-
-    if (left !== null && x < minX) geomancer.camera.transform[4] = minX
-    if (right !== null && x > maxX) geomancer.camera.transform[4] = maxX
-    if (top !== null && y < minY) geomancer.camera.transform[5] = minY
-    if (bottom !== null && y > maxY) geomancer.camera.transform[5] = maxY
-  }
-
   return geomancer
 }
