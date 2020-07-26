@@ -42,7 +42,7 @@ tome.register.subject("boundaries", {
   details: {
     shape: "boundary",
     style: "thinBlackLines",
-    trace: "lone hex",
+    trace: "boundaries",
   },
   transform: [1, 0, 0, 1, 0, 0],
   visible: true,
@@ -51,12 +51,21 @@ tome.register.subject("boundaries", {
 
 tome.register.subject("base layer", {
   details: {
-    subjects: ["lone hex", "boundaries"]
+    subjects: ["boundaries", "lone hex"]
   },
   transform: [1, 0, 0, 1, 0, 0],
   visible: true,
   renderer: "nested",
 })
+
+tome.register.mode("tracing",
+  {
+    mousedown: (mouse, {geo}) => {
+      console.log(geo.handles.intersectPoint({x: mouse.offsetX, y: mouse.offsetY}))
+    }
+  },
+  (state) => state
+)
 
 
 let geo = geomancer();
@@ -64,7 +73,7 @@ geo.camera.extents = {min: {x: 0, y: 0, zoom: null}, max: {x: 800, y: 800, zoom:
 geo.scene = ["base layer"]
 
 let mode = {
-  name: "default",
+  name: "tracing",
   state: {}
 }
 </script>

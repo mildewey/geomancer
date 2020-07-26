@@ -151,6 +151,8 @@ var app = (function () {
         }
     }
 
+    const globals = (typeof window !== 'undefined' ? window : global);
+
     function bind(component, name, callback) {
         const index = component.$$.props[name];
         if (index !== undefined) {
@@ -563,133 +565,122 @@ var app = (function () {
         'default': measure
     });
 
-    function sorter (a, b) {
-      if (a.index < b.index) return -1
-      if (a.index > b.index) return 1
-      return 0
-    }
-
     function tracer (init = []) { // init is filled with objects that have a min point, a max point, and a value
       const tracer = {
         x: [],
         y: [],
-        checks: {}
+        checks: {},
+        order: {}
       };
+      let order = 0;
 
-      return concat(tracer, init)
-    }
-
-    function insert$1 (tracer, {min, max, value, check}) {
-      tracer.checks[value] = check;
-      tracer.x.push({index: Math.floor(min.x), value});
-      tracer.x.push({index: Math.floor(max.x), value});
-      tracer.x.sort(sorter);
-
-      tracer.y.push({index: Math.floor(min.y), value});
-      tracer.y.push({index: Math.floor(max.y), value});
-      tracer.y.sort(sorter);
-    }
-
-    function concat (tracer, boxes) {
-      boxes.forEach(box => tracer.checks[box.value]=box.check);
-
-      tracer.x = boxes.map(({min, value}) => {
-        return {index: Math.floor(min.x), value}
-      }).concat(boxes.map(({max, value}) => {
-        return {index: Math.floor(max.x), value}
-      }));
-
-      tracer.y = boxes.map(({min, value}) => {
-        return {index: Math.floor(min.y), value}
-      }).concat(boxes.map(({max, value}) => {
-        return {index: Math.floor(max.y), value}
-      }));
-
-      tracer.x.sort(sorter);
-      tracer.y.sort(sorter);
-
-      return tracer
-    }
-
-    function intersectPoint (tracer, point) {
-      let active = new Set();
-      let x = Math.floor(point.x);
-      let y = Math.floor(point.y);
-
-      for (let i in tracer.x) {
-        let box = tracer.x[i];
-        if (box.index <= x) {
-          if (active.has(box.value)) {
-            active.delete(box.value);
-          } else {
-            active.add(box.value);
-          }
-        } else {
-          break
-        }
+      function orderSort(a, b) {
+        console.log(a, b, tracer.order[a], tracer.order[b]);
+        if (tracer.order[a] < tracer.order[b]) return 1
+        if (tracer.order[a] > tracer.order[b]) return -1
+        return 0
       }
 
-      let xintersects = [...active];
-      active = new Set();
-
-      for (let i in tracer.y) {
-        let box = tracer.y[i];
-        if (box.index <= y) {
-          if (active.has(box.value)) {
-            active.delete(box.value);
-          } else {
-            active.add(box.value);
-          }
-        } else {
-          break
-        }
+      function sorter (a, b) {
+        if (a.index < b.index) return -1
+        if (a.index > b.index) return 1
+        return 0
       }
 
-      let possibles = [...xintersects].filter(val => active.has(val));
-      return possibles.filter(val => tracer.checks[val](point.x, point.y))
-    }
+      return {
+        insert: (min, max, value, check) => {
+          tracer.checks[value] = check;
+          tracer.order[value] = order;
+          order = order + 1;
 
-    function intersectBox (tracer, {min, max}) {
-      let active = new Set();
-      let xmin = Math.floor(min.x);
-      let xmax = Math.floor(max.x);
-      let ymin = Math.floor(min.y);
-      let ymax = Math.floor(max.y);
+          tracer.x.push({index: Math.floor(min.x), value});
+          tracer.x.push({index: Math.floor(max.x), value});
+          tracer.x.sort(sorter);
 
-      for (let i in tracer.x) {
-        let box = tracer.x[i];
-        if (box.index <= xmin) {
-          if (active.has(box.value)) {
-            active.delete(box.value);
-          } else {
-            active.add(box.value);
+          tracer.y.push({index: Math.floor(min.y), value});
+          tracer.y.push({index: Math.floor(max.y), value});
+          tracer.y.sort(sorter);
+        },
+        intersectPoint: (point) => {
+          let active = new Set();
+          let x = Math.floor(point.x);
+          let y = Math.floor(point.y);
+
+          for (let i in tracer.x) {
+            let box = tracer.x[i];
+            if (box.index <= x) {
+              if (active.has(box.value)) {
+                active.delete(box.value);
+              } else {
+                active.add(box.value);
+              }
+            } else {
+              break
+            }
           }
-        } else if (box.index <= xmax) {
-          active.add(box.value);
-        } else {
-          break
+
+          let xintersects = [...active];
+          active = new Set();
+
+          for (let i in tracer.y) {
+            let box = tracer.y[i];
+            if (box.index <= y) {
+              if (active.has(box.value)) {
+                active.delete(box.value);
+              } else {
+                active.add(box.value);
+              }
+            } else {
+              break
+            }
+          }
+
+          let possibles = [...xintersects].filter(val => active.has(val));
+          return possibles.filter(val => tracer.checks[val](point.x, point.y)).sort(orderSort)
+        },
+        intersectBox: ({min, max}) => {
+          let active = new Set();
+          let xmin = Math.floor(min.x);
+          let xmax = Math.floor(max.x);
+          let ymin = Math.floor(min.y);
+          let ymax = Math.floor(max.y);
+
+          for (let i in tracer.x) {
+            let box = tracer.x[i];
+            if (box.index <= xmin) {
+              if (active.has(box.value)) {
+                active.delete(box.value);
+              } else {
+                active.add(box.value);
+              }
+            } else if (box.index <= xmax) {
+              active.add(box.value);
+            } else {
+              break
+            }
+          }
+
+          let xintersects = [...active];
+          active = new Set();
+
+          for (let i in tracer.y) {
+            let box = tracer.y[i];
+            if (box.index <= ymin) {
+              if (active.has(box.value)) {
+                active.delete(box.value);
+              } else {
+                active.add(box.value);
+              }
+            } else if (box.index <= ymax) {
+              active.add(box.value);
+            } else {
+              break
+            }
+          }
+
+          return [...xintersects].filter(val => active.has(val)).sort(orderSort)
         }
       }
-
-      let xintersects = [...active];
-      active = new Set();
-
-      for (let i in tracer.y) {
-        let box = tracer.y[i];
-        if (box.index <= ymin) {
-          if (active.has(box.value)) {
-            active.delete(box.value);
-          } else {
-            active.add(box.value);
-          }
-        } else if (box.index <= ymax) {
-          active.add(box.value);
-        } else {
-          break
-        }
-      }
-
-      return [...xintersects].filter(val => active.has(val))
     }
 
     function boxesIntersect(one, two) {
@@ -698,6 +689,19 @@ var app = (function () {
       if (one.max.y < two.min.y) return false
       if (two.max.y < two.max.y) return false
       return true
+    }
+
+    function boxBox(boxes) {
+      return {
+        max: {
+          x: Math.max(...boxes.map(box => box.max.x)),
+          y: Math.max(...boxes.map(box => box.max.y))
+        },
+        min: {
+          x: Math.min(...boxes.map(box => box.min.x)),
+          y: Math.min(...boxes.map(box => box.min.y))
+        }
+      }
     }
 
     function generateHitChecker(context, path, transform) {
@@ -712,11 +716,8 @@ var app = (function () {
 
     var tracer$1 = {
       tracer,
-      insert: insert$1,
-      concat,
-      intersectPoint,
-      intersectBox,
       boxesIntersect,
+      boxBox,
       generateHitChecker,
     };
 
@@ -907,7 +908,7 @@ var app = (function () {
       const finalBox = measure.transformBox(box, transform);
       if (tracer$1.boxesIntersect(viewport, finalBox)) {
         if (trace) {
-          tracer$1.insert(handles, {...finalBox, value: trace, check: tracer$1.generateHitChecker(context, path.shape, transform)});
+          handles.insert(finalBox.min, finalBox.max, trace, tracer$1.generateHitChecker(context, path, transform));
         }
         tome.style(style).painter(context, path);
       }
@@ -1268,6 +1269,8 @@ var app = (function () {
 
     /* src/Example.svelte generated by Svelte v3.20.1 */
 
+    const { console: console_1 } = globals;
+
     function create_fragment$1(ctx) {
     	let updating_geo;
     	let updating_mode;
@@ -1389,7 +1392,7 @@ var app = (function () {
     		details: {
     			shape: "boundary",
     			style: "thinBlackLines",
-    			trace: "lone hex"
+    			trace: "boundaries"
     		},
     		transform: [1, 0, 0, 1, 0, 0],
     		visible: true,
@@ -1397,11 +1400,21 @@ var app = (function () {
     	});
 
     	tome.register.subject("base layer", {
-    		details: { subjects: ["lone hex", "boundaries"] },
+    		details: { subjects: ["boundaries", "lone hex"] },
     		transform: [1, 0, 0, 1, 0, 0],
     		visible: true,
     		renderer: "nested"
     	});
+
+    	tome.register.mode(
+    		"tracing",
+    		{
+    			mousedown: (mouse, { geo }) => {
+    				console.log(geo.handles.intersectPoint({ x: mouse.offsetX, y: mouse.offsetY }));
+    			}
+    		},
+    		state => state
+    	);
 
     	let geo = geomancer();
 
@@ -1411,11 +1424,11 @@ var app = (function () {
     	};
 
     	geo.scene = ["base layer"];
-    	let mode = { name: "default", state: {} };
+    	let mode = { name: "tracing", state: {} };
     	const writable_props = [];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<geomancer-example> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console_1.warn(`<geomancer-example> was created with unknown prop '${key}'`);
     	});
 
     	let { $$slots = {}, $$scope } = $$props;
