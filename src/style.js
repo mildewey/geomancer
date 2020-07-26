@@ -73,8 +73,19 @@ function pattern(context, url, type) {
   return ptrn
 }
 
+function pallettesToPainters (pallettes) {
+  let painters = {}
+  for (let id in pallettes) {
+    let painter = palletteToPainter(pallettes[id])
+    painters[id] = painter
+  }
+  return painters
+}
 
-exports.linearGradient = linearGradient
-exports.radialGradient = radialGradient
-exports.pattern = pattern
-exports.palletteToPainter = palletteToPainter
+export default {
+  linearGradient,
+  radialGradient,
+  pattern,
+  palletteToPainter,
+  pallettesToPainters
+}

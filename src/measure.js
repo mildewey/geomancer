@@ -145,7 +145,7 @@ function pathToCanvas(path) {
 }
 
 function pathValidate(path) {
-  if (!path.length) return 'Paths must have at least 2 instructions'
+  if (!path.length) return 'Paths must have at least 1 instruction'
 
   let errors = []
   path.forEach(subpath => {
@@ -156,7 +156,40 @@ function pathValidate(path) {
   return errors
 }
 
-exports.pathToBox = pathToBox
-exports.transformBox = transformBox
-exports.pathToCanvas = pathToCanvas
-exports.pathValidate = pathValidate
+function pathsToShapes (paths) {
+  let shapes = {}
+  for (let id in paths) {
+    let shape = pathToCanvas(paths[id])
+    shapes[id] = shape
+  }
+  return shapes
+}
+
+function pathsToBoxes (paths) {
+  let boxes = {}
+  for (let id in paths) {
+    let box = pathToBox(paths[id])
+    boxes[id] = box
+  }
+  return boxes
+}
+
+function applyTransform (base, apply) {
+  return [
+    base[0]*apply[0] + base[2]*apply[1],
+    base[1]*apply[0] + base[3]*apply[1],
+    base[0]*apply[2] + base[2]*apply[3],
+    base[1]*apply[2] + base[3]*apply[3],
+    base[0]*apply[4] + base[2]*apply[5] + base[4],
+    base[1]*apply[4] + base[3]*apply[5] + base[5],
+  ]
+}
+
+export default {
+  pathsToShapes,
+  pathToBox,
+  transformBox,
+  pathToCanvas,
+  pathValidate,
+  applyTransform
+}
