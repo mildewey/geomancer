@@ -1,21 +1,12 @@
-import Geomancer from './Geomancer.svelte'
-import Example from './Example.svelte'
 import geomancer from './geomancer'
-import elemental from './elemental'
-import measure from './measure'
-import style from './style'
-import tracer from './tracer'
-import tome from './tome'
-import view from './view'
+export default geomancer
 
-export default {
-  Example,
-  Geomancer,
-  geomancer,
-  elemental,
-  measure,
-  style,
-  tracer,
-  tome,
-  view,
-}
+export { default as Geomancer } from './Geomancer.svelte'
+export { default as Example } from './Example.svelte'
+export { default as geomancer } from './geomancer'
+export { default as elemental } from './elemental'
+export { default as measure } from './measure'
+export { default as style } from './style'
+export { default as tracer } from './tracer'
+export { default as tome } from './tome'
+export { default as view } from './view'
