@@ -8,7 +8,6 @@ function tracer (init = []) { // init is filled with objects that have a min poi
   let order = 0
 
   function orderSort(a, b) {
-    console.log(a, b, tracer.order[a], tracer.order[b])
     if (tracer.order[a] < tracer.order[b]) return 1
     if (tracer.order[a] > tracer.order[b]) return -1
     return 0
