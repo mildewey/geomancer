@@ -1,4 +1,4 @@
-function tracer (init = []) { // init is filled with objects that have a min point, a max point, and a value
+export default function tracer (init = []) { // init is filled with objects that have a min point, a max point, and a value
   const tracer = {
     x: [],
     y: [],
@@ -113,42 +113,4 @@ function tracer (init = []) { // init is filled with objects that have a min poi
       return [...xintersects].filter(val => active.has(val)).sort(orderSort)
     }
   }
-}
-
-function boxesIntersect(one, two) {
-  if (one.max.x < two.min.x) return false
-  if (two.max.x < one.min.x) return false
-  if (one.max.y < two.min.y) return false
-  if (two.max.y < two.max.y) return false
-  return true
-}
-
-function boxBox(boxes) {
-  return {
-    max: {
-      x: Math.max(...boxes.map(box => box.max.x)),
-      y: Math.max(...boxes.map(box => box.max.y))
-    },
-    min: {
-      x: Math.min(...boxes.map(box => box.min.x)),
-      y: Math.min(...boxes.map(box => box.min.y))
-    }
-  }
-}
-
-function generateHitChecker(context, path, transform) {
-  return (x, y) => {
-    context.save()
-    context.setTransform(...transform)
-    const inPath = context.isPointInPath(path, x, y)
-    context.restore()
-    return inPath
-  }
-}
-
-export default {
-  tracer,
-  boxesIntersect,
-  boxBox,
-  generateHitChecker,
 }

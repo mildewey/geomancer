@@ -25,9 +25,9 @@ renderer("simple", (context, {shape, style, trace}, {viewport, handles, tome}) =
   const transform = [t.a, t.b, t.c, t.d, t.e, t.f]
   const {box, path} = tome.shape(shape)
   const finalBox = measure.transformBox(box, transform)
-  if (tracer.boxesIntersect(viewport, finalBox)) {
+  if (measure.boxesIntersect(viewport, finalBox)) {
     if (trace) {
-      handles.insert(finalBox.min, finalBox.max, trace, tracer.generateHitChecker(context, path, transform))
+      handles.insert(finalBox.min, finalBox.max, trace, measure.generateHitChecker(context, path, transform))
     }
     tome.style(style).painter(context, path)
   }
